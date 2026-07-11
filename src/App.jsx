@@ -11,7 +11,11 @@ import Products from "./pages/Products";
 import Inventory from "./pages/Inventory";
 import Customers from "./pages/Customers";
 import SalesHistory from "./pages/SalesHistory";
-import ComingSoon from "./pages/ComingSoon";
+import Suppliers from "./pages/Suppliers";
+import Purchases from "./pages/Purchases";
+import Expenses from "./pages/Expenses";
+import Reports from "./pages/Reports";
+import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 
 // HashRouter is used (not BrowserRouter) because the production build is
@@ -38,27 +42,15 @@ export default function App() {
               <Route path="/inventory" element={<Inventory />} />
               <Route path="/sales" element={<SalesHistory />} />
               <Route path="/customers" element={<Customers />} />
-              <Route
-                path="/suppliers"
-                element={<ComingSoon title="Suppliers" description="Manage the vendors that stock your shelves." />}
-              />
-              <Route
-                path="/purchases"
-                element={<ComingSoon title="Purchases" description="Track purchase orders placed with your suppliers." />}
-              />
-              <Route
-                path="/reports"
-                element={<ComingSoon title="Reports" description="Analyze sales performance and profitability." />}
-              />
-              <Route
-                path="/expenses"
-                element={<ComingSoon title="Expenses" description="Track operating costs for your store." />}
-              />
+              <Route path="/suppliers" element={<Suppliers />} />
+              <Route path="/purchases" element={<Purchases />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/expenses" element={<Expenses />} />
               <Route
                 path="/settings"
                 element={
                   <ProtectedRoute allowedRoles={["admin"]}>
-                    <ComingSoon title="Settings" description="Configure your store, tax rules, and team access." />
+                    <Settings />
                   </ProtectedRoute>
                 }
               />

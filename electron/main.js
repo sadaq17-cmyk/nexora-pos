@@ -45,6 +45,13 @@ app.whenReady().then(() => {
   require("./ipc/productHandlers").registerProductHandlers();
   require("./ipc/salesHandlers").registerSalesHandlers();
   require("./ipc/customerHandlers").registerCustomerHandlers();
+  require("./ipc/supplierHandlers").registerSupplierHandlers();
+  require("./ipc/purchaseHandlers").registerPurchaseHandlers();
+  require("./ipc/expenseHandlers").registerExpenseHandlers();
+  require("./ipc/reportHandlers").registerReportHandlers();
+  require("./ipc/settingsHandlers").registerSettingsHandlers();
+  require("./ipc/backupHandlers").registerBackupHandlers();
+  require("./ipc/syncHandlers").registerSyncHandlers();
 
   createWindow();
 

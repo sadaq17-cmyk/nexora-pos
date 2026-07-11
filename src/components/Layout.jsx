@@ -2,10 +2,11 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, ShoppingCart, Package, Boxes, Users, Truck,
   ShoppingBag, BarChart3, Receipt, Settings, Search, Bell,
-  ChevronDown, LogOut, Store, History,
+  ChevronDown, LogOut, Store, History, Wifi, WifiOff,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { isMockMode } from "../lib/api";
+import { useOnlineStatus } from "../lib/useOnlineStatus";
 
 const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -28,6 +29,7 @@ function initials(name = "") {
 export default function Layout() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const online = useOnlineStatus();
 
   return (
     <div className="min-h-screen flex bg-[#F3F6FB]">
@@ -86,6 +88,14 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
+              style={{ color: online ? "#12A150" : "#DC2626", backgroundColor: online ? "#E8FAEF" : "#FDECEC" }}
+              title={online ? "Online — Firebase sync can run" : "Offline — all sales are still saved locally"}
+            >
+              {online ? <Wifi size={12} /> : <WifiOff size={12} />}
+              {online ? "Online" : "Offline"}
+            </div>
             <div className="relative hidden md:block">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B7690]" />
               <input placeholder="Quick search…" className="pl-9 pr-3 py-1.5 rounded-lg border border-[#E4E9F2] text-sm w-56" />

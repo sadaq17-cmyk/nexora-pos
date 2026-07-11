@@ -22,6 +22,28 @@ function registerAuthHandlers() {
       .prepare("SELECT id, name, email, role, active, created_at FROM users ORDER BY name")
       .all();
   });
+
+  ipcMain.handle("auth:createUser", (event, { name, email, password, role }) => {
+    try {
+      const hash = bcrypt.hashSync(password, 10);
+      const info = db
+        .prepare("INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)")
+        .run(name, email.trim().toLowerCase(), hash, role);
+      return { success: true, id: info.lastInsertRowid };
+    } catch (err) {
+      return { success: false, error: err.message.includes("UNIQUE") ? "That email is already in use." : err.message };
+    }
+  });
+
+  ipcMain.handle("auth:setUserActive", (event, { id, active }) => {
+    db.prepare("UPDATE users SET active = ? WHERE id = ?").run(active ? 1 : 0, id);
+    return { success: true };
+  });
+
+  ipcMain.handle("auth:setUserRole", (event, { id, role }) => {
+    db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, id);
+    return { success: true };
+  });
 }
 
 module.exports = { registerAuthHandlers };

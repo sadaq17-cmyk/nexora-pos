@@ -9,3 +9,4 @@ release/
 *.db-wal
 *.db-shm
 .vite/
+electron/firebase/serviceAccount.json
