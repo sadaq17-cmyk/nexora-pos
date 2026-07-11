@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { UserPlus, Phone, Mail, Star, X, Save, CreditCard, FileText, Trash2 } from "lucide-react";
+import { UserPlus, Phone, Mail, Star, X, Save, CreditCard, FileText, Trash2, Pencil } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -13,6 +13,7 @@ export default function Customers() {
   const [customers, setCustomers] = useState([]);
   const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [loading, setLoading] = useState(true);
   const [statementFor, setStatementFor] = useState(null);
@@ -24,16 +25,27 @@ export default function Customers() {
 
   const filtered = customers.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
 
+  const openAdd = () => { setForm(emptyForm); setEditingId(null); setModalOpen(true); };
+  const openEdit = (c) => {
+    setForm({ name: c.name, phone: c.phone || "", email: c.email || "", credit_limit: String(c.credit_limit || 0) });
+    setEditingId(c.id);
+    setModalOpen(true);
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) { showToast("Customer name is required"); return; }
-    const result = await api.customers.create({ ...form, credit_limit: parseFloat(form.credit_limit) || 0 });
+    const payload = { ...form, credit_limit: parseFloat(form.credit_limit) || 0 };
+    const result = editingId
+      ? await api.customers.update({ id: editingId, ...payload })
+      : await api.customers.create(payload);
     if (result.success) {
-      showToast("Customer added");
+      showToast(editingId ? "Customer updated" : "Customer added");
       setForm(emptyForm);
+      setEditingId(null);
       setModalOpen(false);
       await load();
-    } else showToast(result.error || "Could not add customer");
+    } else showToast(result.error || "Could not save customer");
   };
 
   const handleDelete = async (c) => {
@@ -71,7 +83,7 @@ export default function Customers() {
           <p className="text-sm text-[#6B7690] mt-0.5">Credit accounts, loyalty points, and purchase history.</p>
         </div>
         {can("customers", "create") && (
-          <button onClick={() => setModalOpen(true)} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
+          <button onClick={openAdd} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
             <UserPlus size={15} /> Add Customer
           </button>
         )}
@@ -117,6 +129,9 @@ export default function Customers() {
                   <button onClick={() => openStatement(c)} className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-[#E4E9F2] text-xs font-medium text-[#1B2439]">
                     <FileText size={12} /> Statement
                   </button>
+                  {can("customers", "edit") && (
+                    <button onClick={() => openEdit(c)} className="p-1.5 rounded-lg border border-[#E4E9F2] text-[#6B7690]"><Pencil size={13} /></button>
+                  )}
                   {can("customers", "delete") && (
                     <button onClick={() => handleDelete(c)} className="p-1.5 rounded-lg border border-[#E4E9F2] text-[#DC2626]"><Trash2 size={13} /></button>
                   )}
@@ -132,7 +147,7 @@ export default function Customers() {
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setModalOpen(false)}>
           <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-[#1B2439]">Add Customer</h3>
+              <h3 className="font-semibold text-[#1B2439]">{editingId ? "Edit Customer" : "Add Customer"}</h3>
               <button onClick={() => setModalOpen(false)} className="text-[#6B7690]"><X size={18} /></button>
             </div>
             <form onSubmit={handleSave} className="space-y-3">
@@ -144,7 +159,7 @@ export default function Customers() {
                 <input type="number" value={form.credit_limit} onChange={(e) => setForm({ ...form, credit_limit: e.target.value })} className="w-full border border-[#E4E9F2] rounded-lg px-3 py-2 text-sm" />
               </div>
               <button type="submit" className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-white text-sm font-semibold bg-[#2563EB] hover:brightness-110">
-                <Save size={15} /> Save Customer
+                <Save size={15} /> {editingId ? "Save Changes" : "Save Customer"}
               </button>
             </form>
           </div>

@@ -11,7 +11,8 @@
     "build": "vite build",
     "electron:build": "npm run build && electron-builder",
     "electron:build:win": "npm run build && electron-builder --win",
-    "rebuild": "electron-rebuild -f -w better-sqlite3"
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "release:win": "npm install && npm run rebuild && npm run build && npm run electron:build:win"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -40,7 +41,16 @@
     "productName": "NEXORA POS",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!node_modules/electron/**/*",
+      "!node_modules/electron-builder/**/*",
+      "!node_modules/electron-rebuild/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
     ],
     "directories": {
       "output": "release"

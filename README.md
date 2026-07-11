@@ -69,6 +69,24 @@ Requires internet access (Electron downloads its runtime binaries) and a
 machine with Node + build tools — can't run inside this sandbox. Outputs land
 in `release/`: `NEXORA-POS-Setup-<version>.exe` and `NEXORA-POS-Portable-<version>.exe`.
 
+**Full step-by-step Windows instructions, from a clean machine to a running
+app: see [`INSTALL-WINDOWS.md`](./INSTALL-WINDOWS.md).** There's also
+`build-windows.bat` — double-click it to run the entire pipeline
+(install → rebuild native modules → build → package) in one go with clear
+pass/fail output at each step, and `npm run release:win` as the same thing
+from the command line.
+
+Two packaging bugs were caught and fixed by static review (since neither can
+be caught without an actual build, which this sandbox can't run):
+1. The custom `build.files` array in `package.json` was silently excluding
+   `node_modules`, which would have shipped an app missing `better-sqlite3`
+   and `bcryptjs` entirely — added back explicitly, with dev-only tooling
+   (`electron`, `electron-builder`, `electron-rebuild`) excluded again so the
+   installer isn't bloated with build tooling that shouldn't ship.
+2. `better-sqlite3`'s native `.node` binary can't execute from inside an
+   `asar` archive — added `asarUnpack` for it, a well-known gotcha for this
+   exact dependency + electron-builder combination.
+
 ## How this was tested
 
 Same constraint as always: this sandbox has no network access, so

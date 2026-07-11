@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Plus, Building2, Phone, Users, X, Save, Trash2, FileText, CreditCard } from "lucide-react";
+import { Plus, Building2, Phone, Users, X, Save, Trash2, FileText, CreditCard, Pencil } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -13,6 +13,7 @@ export default function Suppliers() {
   const [suppliers, setSuppliers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [statementFor, setStatementFor] = useState(null);
   const [statement, setStatement] = useState(null);
@@ -21,16 +22,26 @@ export default function Suppliers() {
   const load = async () => { setSuppliers(await api.suppliers.getAll()); setLoading(false); };
   useEffect(() => { load(); }, []);
 
+  const openAdd = () => { setForm(emptyForm); setEditingId(null); setModalOpen(true); };
+  const openEdit = (s) => {
+    setForm({ name: s.name, contact_person: s.contact_person || "", phone: s.phone || "", category: s.category || "", status: s.status || "Active" });
+    setEditingId(s.id);
+    setModalOpen(true);
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) { showToast("Supplier name is required"); return; }
-    const result = await api.suppliers.create(form);
+    const result = editingId
+      ? await api.suppliers.update({ id: editingId, ...form })
+      : await api.suppliers.create(form);
     if (result.success) {
-      showToast("Supplier added");
+      showToast(editingId ? "Supplier updated" : "Supplier added");
       setForm(emptyForm);
+      setEditingId(null);
       setModalOpen(false);
       await load();
-    } else showToast(result.error || "Could not add supplier");
+    } else showToast(result.error || "Could not save supplier");
   };
 
   const handleDelete = async (s) => {
@@ -66,7 +77,7 @@ export default function Suppliers() {
           <p className="text-sm text-[#6B7690] mt-0.5">Balances, payments, and purchase history for every vendor.</p>
         </div>
         {can("suppliers", "create") && (
-          <button onClick={() => setModalOpen(true)} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
+          <button onClick={openAdd} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
             <Plus size={15} /> Add Supplier
           </button>
         )}
@@ -106,6 +117,9 @@ export default function Suppliers() {
                 <button onClick={() => openStatement(s)} className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-[#E4E9F2] text-xs font-medium text-[#1B2439]">
                   <FileText size={12} /> Statement
                 </button>
+                {can("suppliers", "edit") && (
+                  <button onClick={() => openEdit(s)} className="p-1.5 rounded-lg border border-[#E4E9F2] text-[#6B7690]"><Pencil size={13} /></button>
+                )}
                 {can("suppliers", "delete") && (
                   <button onClick={() => handleDelete(s)} className="p-1.5 rounded-lg border border-[#E4E9F2] text-[#DC2626]"><Trash2 size={13} /></button>
                 )}
@@ -120,7 +134,7 @@ export default function Suppliers() {
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setModalOpen(false)}>
           <div className="bg-white rounded-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-[#1B2439]">Add Supplier</h3>
+              <h3 className="font-semibold text-[#1B2439]">{editingId ? "Edit Supplier" : "Add Supplier"}</h3>
               <button onClick={() => setModalOpen(false)} className="text-[#6B7690]"><X size={18} /></button>
             </div>
             <form onSubmit={handleSave} className="space-y-3">
@@ -129,7 +143,7 @@ export default function Suppliers() {
               <input placeholder="Phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full border border-[#E4E9F2] rounded-lg px-3 py-2 text-sm" />
               <input placeholder="Category (e.g. Beverages)" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="w-full border border-[#E4E9F2] rounded-lg px-3 py-2 text-sm" />
               <button type="submit" className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-white text-sm font-semibold bg-[#2563EB] hover:brightness-110">
-                <Save size={15} /> Save Supplier
+                <Save size={15} /> {editingId ? "Save Changes" : "Save Supplier"}
               </button>
             </form>
           </div>
