@@ -16,7 +16,12 @@ import Purchases from "./pages/Purchases";
 import Expenses from "./pages/Expenses";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
+import AuditLog from "./pages/AuditLog";
 import NotFound from "./pages/NotFound";
+
+function Guarded({ module, children }) {
+  return <ProtectedRoute module={module}>{children}</ProtectedRoute>;
+}
 
 // HashRouter is used (not BrowserRouter) because the production build is
 // loaded from a local file:// URL inside Electron, where history-API
@@ -36,24 +41,18 @@ export default function App() {
                 </ProtectedRoute>
               }
             >
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/pos" element={<POS />} />
-              <Route path="/products" element={<Products />} />
-              <Route path="/inventory" element={<Inventory />} />
-              <Route path="/sales" element={<SalesHistory />} />
-              <Route path="/customers" element={<Customers />} />
-              <Route path="/suppliers" element={<Suppliers />} />
-              <Route path="/purchases" element={<Purchases />} />
-              <Route path="/reports" element={<Reports />} />
-              <Route path="/expenses" element={<Expenses />} />
-              <Route
-                path="/settings"
-                element={
-                  <ProtectedRoute allowedRoles={["admin"]}>
-                    <Settings />
-                  </ProtectedRoute>
-                }
-              />
+              <Route path="/dashboard" element={<Guarded module="dashboard"><Dashboard /></Guarded>} />
+              <Route path="/pos" element={<Guarded module="pos"><POS /></Guarded>} />
+              <Route path="/products" element={<Guarded module="products"><Products /></Guarded>} />
+              <Route path="/inventory" element={<Guarded module="inventory"><Inventory /></Guarded>} />
+              <Route path="/sales" element={<Guarded module="sales"><SalesHistory /></Guarded>} />
+              <Route path="/customers" element={<Guarded module="customers"><Customers /></Guarded>} />
+              <Route path="/suppliers" element={<Guarded module="suppliers"><Suppliers /></Guarded>} />
+              <Route path="/purchases" element={<Guarded module="purchases"><Purchases /></Guarded>} />
+              <Route path="/reports" element={<Guarded module="reports"><Reports /></Guarded>} />
+              <Route path="/expenses" element={<Guarded module="expenses"><Expenses /></Guarded>} />
+              <Route path="/audit" element={<Guarded module="audit"><AuditLog /></Guarded>} />
+              <Route path="/settings" element={<Guarded module="settings"><Settings /></Guarded>} />
             </Route>
 
             <Route path="/" element={<Navigate to="/dashboard" replace />} />

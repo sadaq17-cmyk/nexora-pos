@@ -50,8 +50,17 @@ app.whenReady().then(() => {
   require("./ipc/expenseHandlers").registerExpenseHandlers();
   require("./ipc/reportHandlers").registerReportHandlers();
   require("./ipc/settingsHandlers").registerSettingsHandlers();
-  require("./ipc/backupHandlers").registerBackupHandlers();
+  const { registerBackupHandlers, runAutoBackupIfDue } = require("./ipc/backupHandlers");
+  registerBackupHandlers();
   require("./ipc/syncHandlers").registerSyncHandlers();
+  require("./ipc/permissionHandlers").registerPermissionHandlers();
+  require("./ipc/auditHandlers").registerAuditHandlers();
+
+  // Scheduled automatic backups: check on startup, then once an hour.
+  // runAutoBackupIfDue() itself decides whether enough time has actually
+  // passed based on the auto_backup_interval_hours setting.
+  runAutoBackupIfDue();
+  setInterval(runAutoBackupIfDue, 60 * 60 * 1000);
 
   createWindow();
 

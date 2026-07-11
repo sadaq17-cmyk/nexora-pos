@@ -1,7 +1,9 @@
 const bcrypt = require("bcryptjs");
 const { db } = require("./database");
+const { seedPermissions } = require("../permissions");
 
 function seed() {
+  seedPermissions();
   const userCount = db.prepare("SELECT COUNT(*) AS n FROM users").get().n;
   if (userCount === 0) {
     const insertUser = db.prepare(
@@ -11,6 +13,13 @@ function seed() {
     insertUser.run("Jane Mwikali", "admin@nexorapos.com", hash("admin123"), "admin");
     insertUser.run("Brian Otieno", "cashier@nexorapos.com", hash("cashier123"), "cashier");
     insertUser.run("Lucy Wambui", "manager@nexorapos.com", hash("manager123"), "manager");
+    insertUser.run("David Kamau", "accountant@nexorapos.com", hash("accountant123"), "accountant");
+  }
+
+  const expenseCatCount = db.prepare("SELECT COUNT(*) AS n FROM expense_categories").get().n;
+  if (expenseCatCount === 0) {
+    const insertCat = db.prepare("INSERT INTO expense_categories (name) VALUES (?)");
+    ["Rent", "Utilities", "Payroll", "Logistics", "Maintenance", "Marketing", "Other"].forEach((name) => insertCat.run(name));
   }
 
   const catCount = db.prepare("SELECT COUNT(*) AS n FROM categories").get().n;

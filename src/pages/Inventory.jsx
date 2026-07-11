@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Boxes, DollarSign, AlertTriangle, Package, Plus, Minus } from "lucide-react";
 import { api } from "../lib/api";
+import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 
 const money = (n) => `Ksh ${Number(n).toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -18,6 +19,7 @@ function StatCard({ icon: Icon, label, value, color }) {
 }
 
 export default function Inventory() {
+  const { can } = useAuth();
   const { showToast } = useToast();
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -32,9 +34,10 @@ export default function Inventory() {
 
   const adjust = async (p, delta) => {
     setAdjustingId(p.id);
-    await api.products.adjustStock(p.id, delta);
-    await load();
+    const result = await api.products.adjustStock(p.id, delta, "Manual adjustment from Inventory");
     setAdjustingId(null);
+    if (!result.success) { showToast(result.error || "Could not adjust stock"); return; }
+    await load();
     showToast(`${p.name} stock ${delta > 0 ? "increased" : "decreased"} by ${Math.abs(delta)}`);
   };
 
@@ -84,10 +87,12 @@ export default function Inventory() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <button disabled={adjustingId === p.id} onClick={() => adjust(p, -1)} className="w-7 h-7 rounded-full border border-[#E4E9F2] flex items-center justify-center disabled:opacity-40"><Minus size={12} /></button>
-                        <button disabled={adjustingId === p.id} onClick={() => adjust(p, 1)} className="w-7 h-7 rounded-full border border-[#E4E9F2] flex items-center justify-center disabled:opacity-40"><Plus size={12} /></button>
-                      </div>
+                      {can("inventory", "edit") ? (
+                        <div className="flex items-center gap-1.5">
+                          <button disabled={adjustingId === p.id} onClick={() => adjust(p, -1)} className="w-7 h-7 rounded-full border border-[#E4E9F2] flex items-center justify-center disabled:opacity-40"><Minus size={12} /></button>
+                          <button disabled={adjustingId === p.id} onClick={() => adjust(p, 1)} className="w-7 h-7 rounded-full border border-[#E4E9F2] flex items-center justify-center disabled:opacity-40"><Plus size={12} /></button>
+                        </div>
+                      ) : <span className="text-xs text-[#6B7690]">View only</span>}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${low ? "text-[#DC2626] bg-[#FDECEC]" : "text-[#12A150] bg-[#E8FAEF]"}`}>

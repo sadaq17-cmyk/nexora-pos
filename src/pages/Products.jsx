@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Plus, Pencil, Trash2, Search, Package, X, Save } from "lucide-react";
 import { api } from "../lib/api";
+import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 
 const money = (n) => `Ksh ${Number(n).toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -9,6 +10,7 @@ const CATEGORY_COLORS = { Groceries: "#2563EB", Dairy: "#38BDF8", Bakery: "#F59E
 const emptyForm = { name: "", barcode: "", category_id: "", price: "", cost: "", stock: "", reorder_level: "10", unit: "unit" };
 
 export default function Products() {
+  const { can } = useAuth();
   const { showToast } = useToast();
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -54,10 +56,12 @@ export default function Products() {
       unit: form.unit || "unit",
     };
     if (editingId) {
-      await api.products.update({ id: editingId, ...payload });
+      const result = await api.products.update({ id: editingId, ...payload });
+      if (!result.success) { showToast(result.error || "Could not update product"); return; }
       showToast("Product updated");
     } else {
-      await api.products.create(payload);
+      const result = await api.products.create(payload);
+      if (!result.success) { showToast(result.error || "Could not add product"); return; }
       showToast("Product added");
     }
     setModalOpen(false);
@@ -66,7 +70,8 @@ export default function Products() {
 
   const handleDelete = async (p) => {
     if (!confirm(`Delete "${p.name}"? This can't be undone.`)) return;
-    await api.products.delete(p.id);
+    const result = await api.products.delete(p.id);
+    if (!result.success) { showToast(result.error || "Could not delete product"); return; }
     showToast("Product deleted");
     await load();
   };
@@ -78,9 +83,11 @@ export default function Products() {
           <h1 className="text-2xl font-bold text-[#1B2439]">Products</h1>
           <p className="text-sm text-[#6B7690] mt-0.5">Manage your product catalog, pricing, and categories.</p>
         </div>
-        <button onClick={openAdd} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
-          <Plus size={15} /> Add Product
-        </button>
+        {can("products", "create") && (
+          <button onClick={openAdd} className="flex items-center gap-1.5 text-white px-4 py-2 rounded-lg text-sm font-medium hover:brightness-110 bg-[#2563EB]">
+            <Plus size={15} /> Add Product
+          </button>
+        )}
       </div>
 
       <div className="relative mb-4 w-64">
@@ -121,8 +128,8 @@ export default function Products() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-sm text-right">
-                    <button onClick={() => openEdit(p)} className="p-1.5 rounded hover:bg-[#F1F3F8] mr-1 text-[#6B7690]"><Pencil size={14} /></button>
-                    <button onClick={() => handleDelete(p)} className="p-1.5 rounded hover:bg-[#FDECEC] text-[#DC2626]"><Trash2 size={14} /></button>
+                    {can("products", "edit") && <button onClick={() => openEdit(p)} className="p-1.5 rounded hover:bg-[#F1F3F8] mr-1 text-[#6B7690]"><Pencil size={14} /></button>}
+                    {can("products", "delete") && <button onClick={() => handleDelete(p)} className="p-1.5 rounded hover:bg-[#FDECEC] text-[#DC2626]"><Trash2 size={14} /></button>}
                   </td>
                 </tr>
               ))}

@@ -1,5 +1,6 @@
 const { ipcMain } = require("electron");
-const { syncPendingSales, getPendingCount, isConfigured } = require("../firebase/sync");
+const { runFullSync, getPendingCount, isConfigured } = require("../firebase/sync");
+const { logAudit } = require("../audit");
 
 let autoSyncTimer = null;
 
@@ -11,7 +12,11 @@ function registerSyncHandlers() {
 
   ipcMain.handle("sync:triggerNow", async () => {
     try {
-      return await syncPendingSales();
+      const result = await runFullSync();
+      if (result.success) {
+        logAudit("manual_sync", "settings", { synced: result.push?.synced, failed: result.push?.failed });
+      }
+      return result;
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -21,10 +26,20 @@ function registerSyncHandlers() {
     if (autoSyncTimer) { clearInterval(autoSyncTimer); autoSyncTimer = null; }
     if (enabled) {
       autoSyncTimer = setInterval(() => {
-        syncPendingSales().catch((err) => console.warn("[firebase-sync] auto-sync error:", err.message));
+        runFullSync().catch((err) => console.warn("[firebase-sync] auto-sync error:", err.message));
       }, 60_000);
     }
     return { success: true };
+  });
+
+  // Called by the renderer the moment `navigator.onLine` flips true, so
+  // reconnecting doesn't wait for the next 60s tick.
+  ipcMain.handle("sync:onConnectionRestored", async () => {
+    try {
+      return await runFullSync();
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   });
 }
 

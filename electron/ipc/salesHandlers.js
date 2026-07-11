@@ -1,5 +1,10 @@
 const { ipcMain } = require("electron");
 const { db } = require("../db/database");
+const { requirePermission } = require("../permissions");
+const { logAudit } = require("../audit");
+const { enqueueSync } = require("../firebase/queue");
+
+const LOYALTY_POINTS_PER_KSH = 1 / 100; // 1 point per Ksh 100 spent
 
 function nextInvoiceNo() {
   const row = db.prepare("SELECT COUNT(*) AS n FROM sales").get();
@@ -21,11 +26,25 @@ function registerSalesHandlers() {
       `INSERT INTO sale_items (sale_id, product_id, product_name, qty, price, cost)
        VALUES (?, ?, ?, ?, ?, ?)`
     );
-    const decrementStock = db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?");
+    const decrementStock = db.prepare("UPDATE products SET stock = stock - ?, updated_at = datetime('now') WHERE id = ?");
 
     for (const item of sale.items) {
       insertItem.run(saleId, item.product_id, item.name, item.qty, item.price, item.cost || 0);
       decrementStock.run(item.qty, item.product_id);
+    }
+
+    if (sale.customer_id) {
+      // Credit sales increase what the customer owes; every sale (regardless
+      // of payment method) earns loyalty points on a paying customer's account.
+      if (sale.payment_method === "Credit") {
+        db.prepare("UPDATE customers SET balance = balance + ?, updated_at = datetime('now') WHERE id = ?")
+          .run(sale.total, sale.customer_id);
+      }
+      const pointsEarned = Math.floor(sale.total * LOYALTY_POINTS_PER_KSH);
+      if (pointsEarned > 0) {
+        db.prepare("UPDATE customers SET points = points + ?, updated_at = datetime('now') WHERE id = ?")
+          .run(pointsEarned, sale.customer_id);
+      }
     }
 
     return { id: saleId, invoice_no };
@@ -33,7 +52,10 @@ function registerSalesHandlers() {
 
   ipcMain.handle("sales:create", (event, sale) => {
     try {
+      requirePermission("pos", "create");
       const result = createSale(sale);
+      logAudit("create_sale", "sales", { invoice_no: result.invoice_no, total: sale.total, payment_method: sale.payment_method });
+      enqueueSync("sales", result.id, "create", { ...sale, ...result });
       return { success: true, ...result };
     } catch (err) {
       return { success: false, error: err.message };

@@ -1,25 +1,27 @@
+import { useEffect } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, ShoppingCart, Package, Boxes, Users, Truck,
   ShoppingBag, BarChart3, Receipt, Settings, Search, Bell,
-  ChevronDown, LogOut, Store, History, Wifi, WifiOff,
+  ChevronDown, LogOut, Store, History, Wifi, WifiOff, ShieldCheck,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { isMockMode } from "../lib/api";
+import { api, isMockMode } from "../lib/api";
 import { useOnlineStatus } from "../lib/useOnlineStatus";
 
 const NAV_ITEMS = [
-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/pos", label: "POS Sales", icon: ShoppingCart },
-  { to: "/products", label: "Products", icon: Package },
-  { to: "/inventory", label: "Inventory", icon: Boxes },
-  { to: "/sales", label: "Sales History", icon: History },
-  { to: "/customers", label: "Customers", icon: Users },
-  { to: "/suppliers", label: "Suppliers", icon: Truck },
-  { to: "/purchases", label: "Purchases", icon: ShoppingBag },
-  { to: "/reports", label: "Reports", icon: BarChart3 },
-  { to: "/expenses", label: "Expenses", icon: Receipt },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, module: "dashboard" },
+  { to: "/pos", label: "POS Sales", icon: ShoppingCart, module: "pos" },
+  { to: "/products", label: "Products", icon: Package, module: "products" },
+  { to: "/inventory", label: "Inventory", icon: Boxes, module: "inventory" },
+  { to: "/sales", label: "Sales History", icon: History, module: "sales" },
+  { to: "/customers", label: "Customers", icon: Users, module: "customers" },
+  { to: "/suppliers", label: "Suppliers", icon: Truck, module: "suppliers" },
+  { to: "/purchases", label: "Purchases", icon: ShoppingBag, module: "purchases" },
+  { to: "/reports", label: "Reports", icon: BarChart3, module: "reports" },
+  { to: "/expenses", label: "Expenses", icon: Receipt, module: "expenses" },
+  { to: "/audit", label: "Audit Log", icon: ShieldCheck, module: "audit" },
+  { to: "/settings", label: "Settings", icon: Settings, module: "settings" },
 ];
 
 function initials(name = "") {
@@ -27,9 +29,23 @@ function initials(name = "") {
 }
 
 export default function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, can } = useAuth();
   const location = useLocation();
   const online = useOnlineStatus();
+
+  const visibleNav = NAV_ITEMS.filter((n) => can(n.module, "view"));
+
+  // Background sync: the main process runs its own 60s timer once enabled,
+  // and we also nudge it immediately whenever the browser regains connectivity
+  // so reconnecting doesn't sit idle waiting for the next tick.
+  useEffect(() => {
+    api.sync?.setAutoSync?.(true);
+    return () => api.sync?.setAutoSync?.(false);
+  }, []);
+
+  useEffect(() => {
+    if (online) api.sync?.onConnectionRestored?.();
+  }, [online]);
 
   return (
     <div className="min-h-screen flex bg-[#F3F6FB]">
@@ -48,7 +64,7 @@ export default function Layout() {
         </div>
 
         <nav className="flex-1 overflow-y-auto py-3 px-2.5 space-y-0.5">
-          {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+          {visibleNav.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
