@@ -1,102 +1,283 @@
 import { useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
-import { Store, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Eye, EyeOff, Store } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { PERMANENT_COMPANY_OWNER } from "../lib/permanentOwner";
+import { PERMANENT_PLATFORM_ADMIN } from "../lib/permanentPlatformAdmin";
+import { PASSWORD_HINT, validatePassword } from "../lib/passwordPolicy";
 
 export default function Login() {
-  const { user, login } = useAuth();
+  const { user, login, loginByEmail, verifyMfa, mustChangePassword, subscriptionLocked } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("admin@nexorapos.com");
-  const [password, setPassword] = useState("admin123");
+  const [mode, setMode] = useState("email");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
+  const [companyIdentifier, setCompanyIdentifier] = useState("");
+  const [companyRequired, setCompanyRequired] = useState(false);
+  const [platformIdentifier, setPlatformIdentifier] = useState("platform");
+  const [platformUsername, setPlatformUsername] = useState(PERMANENT_PLATFORM_ADMIN.username);
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [mfaFactorId, setMfaFactorId] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
 
-  if (user) return <Navigate to="/dashboard" replace />;
+  if (user) {
+    if (mustChangePassword) return <Navigate to="/change-password" replace />;
+    if (subscriptionLocked) return <Navigate to="/subscription/renew" replace />;
+    return <Navigate to={user.role === "platform_owner" ? "/platform" : "/dashboard"} replace />;
+  }
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const finish = (result) => {
+    if (result.success) {
+      setMfaFactorId("");
+      setMfaCode("");
+      if (result.mustChangePassword || result.user?.must_change_password) {
+        navigate("/change-password");
+      } else if (result.subscriptionLocked) {
+        navigate("/subscription/renew");
+      } else {
+        navigate(result.user.role === "platform_owner" ? "/platform" : "/dashboard");
+      }
+    } else if (result.code === "MFA_REQUIRED") {
+      setMfaFactorId(result.factorId || "");
+      setMfaCode("");
+      setError(result.error || "Enter your authenticator code.");
+    } else {
+      if (result.code === "COMPANY_REQUIRED") setCompanyRequired(true);
+      setError(result.error || "Login failed.");
+    }
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setError("");
     setSubmitting(true);
-    const result = await login(email, password);
+    if (mfaFactorId) {
+      const result = await verifyMfa(mfaFactorId, mfaCode);
+      setSubmitting(false);
+      finish(result);
+      return;
+    }
+    const policy = validatePassword(password);
+    if (password.length < 8) {
+      setSubmitting(false);
+      setError(policy.message || "Password must be at least 8 characters.");
+      return;
+    }
+    let result;
+    if (mode === "platform") {
+      result = await login(platformIdentifier, platformUsername, password, rememberMe);
+    } else if (mode === "company") {
+      result = await login(companyIdentifier, email, password, rememberMe);
+    } else {
+      result = await loginByEmail(email, password, rememberMe, companyRequired ? companyIdentifier : "");
+    }
     setSubmitting(false);
-    if (result.success) navigate("/dashboard");
-    else setError(result.error || "Login failed.");
+    finish(result);
+  };
+
+  const switchMode = (id) => {
+    setMode(id);
+    setError("");
+    setCompanyRequired(false);
+    setMfaFactorId("");
+    setMfaCode("");
   };
 
   return (
-    <div className="min-h-screen flex">
-      <div
-        className="hidden lg:flex w-1/2 relative overflow-hidden flex-col justify-between p-12"
-        style={{ background: "linear-gradient(150deg, #0B1C3D 0%, #2563EB 130%)" }}
-      >
-        <div className="absolute -top-24 -right-24 w-96 h-96 rounded-full bg-white/5" />
-        <div className="absolute bottom-0 left-0 w-72 h-72 rounded-full bg-white/5 -mb-24 -ml-24" />
-        <div className="flex items-center gap-2.5 relative z-10">
-          <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center backdrop-blur">
-            <Store size={20} className="text-white" />
+    <div className="nx-login-page">
+      <div className="nx-login-inner">
+        <div className="nx-login-brand">
+          <div className="nx-login-brand-mark" aria-hidden>
+            <Store size={22} strokeWidth={1.75} />
           </div>
-          <span className="text-white text-xl font-bold tracking-wide">NEXORA POS</span>
+          <h1>Nexora POS</h1>
+          <p>Enterprise point of sale for retail and multi-branch teams.</p>
         </div>
-        <div className="relative z-10">
-          <h2 className="text-white text-3xl font-bold leading-tight mb-3">
-            Run your supermarket<br />with total confidence.
-          </h2>
-          <p className="text-white/70 text-sm max-w-sm">
-            Sales, inventory, purchases, and reporting — unified in one fast,
-            reliable point of sale built for busy retail floors.
-          </p>
-        </div>
-        <div className="text-white/40 text-xs relative z-10">© 2026 Nexora Retail Systems</div>
-      </div>
 
-      <div className="flex-1 flex items-center justify-center p-6 bg-[#F3F6FB]">
-        <div className="w-full max-w-sm animate-fadein">
-          <div className="lg:hidden flex items-center gap-2 mb-8 justify-center">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-[#2563EB]">
-              <Store size={18} className="text-white" />
-            </div>
-            <span className="text-lg font-bold text-[#1B2439]">NEXORA POS</span>
+        <div className="nx-login-card">
+          <header className="nx-login-card-head">
+            <h2>Sign in</h2>
+            <p>Company users sign in with email. Platform Super Admin uses Platform login.</p>
+          </header>
+
+          <div className="nx-login-tabs" role="tablist" aria-label="Sign-in method">
+            {[
+              ["email", "Email"],
+              ["company", "Company"],
+              ["platform", "Platform"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={mode === id}
+                onClick={() => switchMode(id)}
+                className={mode === id ? "is-active" : ""}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-          <h1 className="text-2xl font-bold mb-1 text-[#1B2439]">Welcome back</h1>
-          <p className="text-sm mb-7 text-[#6B7690]">Sign in to your store dashboard</p>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="text-xs font-medium mb-1.5 block text-[#1B2439]">Email address</label>
-              <div className="relative">
-                <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B7690]" />
+          <form onSubmit={handleSubmit} className="nx-login-form">
+            {!mfaFactorId && mode === "platform" && (
+              <>
+                <div className="nx-login-field">
+                  <label className="nx-login-label" htmlFor="login-platform-id">Platform identifier</label>
+                  <input
+                    id="login-platform-id"
+                    required
+                    value={platformIdentifier}
+                    onChange={(event) => setPlatformIdentifier(event.target.value)}
+                    className="nx-login-input"
+                    autoComplete="organization"
+                  />
+                </div>
+                <div className="nx-login-field">
+                  <label className="nx-login-label" htmlFor="login-platform-user">Username or email</label>
+                  <input
+                    id="login-platform-user"
+                    required
+                    value={platformUsername}
+                    onChange={(event) => setPlatformUsername(event.target.value)}
+                    className="nx-login-input"
+                    placeholder={PERMANENT_PLATFORM_ADMIN.username}
+                    autoComplete="username"
+                  />
+                </div>
+              </>
+            )}
+
+            {!mfaFactorId && mode === "company" && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-company-code">Company code or verified domain</label>
                 <input
-                  type="email" value={email} onChange={(e) => setEmail(e.target.value)} required
-                  className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-[#E4E9F2] text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]"
+                  id="login-company-code"
+                  required
+                  value={companyIdentifier}
+                  onChange={(event) => setCompanyIdentifier(event.target.value)}
+                  className="nx-login-input"
+                  placeholder={PERMANENT_COMPANY_OWNER.company_code}
+                  autoComplete="organization"
                 />
               </div>
-            </div>
-            <div>
-              <label className="text-xs font-medium mb-1.5 block text-[#1B2439]">Password</label>
-              <div className="relative">
-                <Lock size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B7690]" />
-                <input
-                  type={showPw ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} required
-                  className="w-full pl-9 pr-9 py-2.5 rounded-lg border border-[#E4E9F2] text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]"
-                />
-                <button type="button" onClick={() => setShowPw((s) => !s)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6B7690]">
-                  {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-              </div>
-            </div>
+            )}
 
-            {error && <div className="text-xs text-[#DC2626] bg-[#FEF6F6] border border-[#FBD5D5] rounded-lg px-3 py-2">{error}</div>}
+            {!mfaFactorId && mode !== "platform" && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-email">
+                  {mode === "company" ? "Username or email" : "Email"}
+                </label>
+                <input
+                  id="login-email"
+                  required
+                  type={mode === "email" ? "email" : "text"}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  className="nx-login-input"
+                  placeholder={mode === "company" ? PERMANENT_COMPANY_OWNER.username : PERMANENT_COMPANY_OWNER.email}
+                  autoComplete="username"
+                />
+              </div>
+            )}
+
+            {!mfaFactorId && mode === "email" && companyRequired && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-company-required">Company code required</label>
+                <input
+                  id="login-company-required"
+                  required
+                  value={companyIdentifier}
+                  onChange={(event) => setCompanyIdentifier(event.target.value)}
+                  className="nx-login-input"
+                  placeholder="Your company code"
+                  autoComplete="organization"
+                />
+              </div>
+            )}
+
+            {!mfaFactorId && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-password">Password</label>
+                <div className="nx-login-password">
+                  <input
+                    id="login-password"
+                    required
+                    minLength={8}
+                    type={showPw ? "text" : "password"}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    className="nx-login-input has-toggle"
+                    autoComplete="current-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPw((value) => !value)}
+                    className="nx-login-pw-toggle"
+                    aria-label={showPw ? "Hide password" : "Show password"}
+                  >
+                    {showPw ? <EyeOff size={18} strokeWidth={1.75} /> : <Eye size={18} strokeWidth={1.75} />}
+                  </button>
+                </div>
+                {mode === "platform" && <p className="nx-login-hint">{PASSWORD_HINT}</p>}
+              </div>
+            )}
+
+            {mfaFactorId && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-mfa">Authenticator code</label>
+                <input
+                  id="login-mfa"
+                  required
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={mfaCode}
+                  onChange={(event) => setMfaCode(event.target.value)}
+                  className="nx-login-input"
+                  placeholder="6-digit code"
+                />
+              </div>
+            )}
+
+            {!mfaFactorId && (
+              <div className="nx-login-meta">
+                <label className="nx-login-remember">
+                  <input
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(event) => setRememberMe(event.target.checked)}
+                  />
+                  <span>Remember me</span>
+                </label>
+                <Link to="/forgot-password" className="nx-login-link">Forgot password</Link>
+              </div>
+            )}
+
+            {error && (
+              <div className="nx-login-error" role="alert">
+                {error}
+              </div>
+            )}
 
             <button
-              type="submit" disabled={submitting}
-              className="w-full py-2.5 rounded-lg text-white text-sm font-semibold shadow-sm hover:shadow-md transition-all hover:brightness-110 disabled:opacity-60 bg-[#2563EB]"
+              disabled={submitting}
+              type="submit"
+              className={`nx-login-submit${submitting ? " is-loading" : ""}`}
             >
-              {submitting ? "Signing in…" : "Sign In"}
+              {submitting
+                ? (mfaFactorId ? "Verifying…" : "Signing in…")
+                : (mfaFactorId ? "Verify code" : "Sign in")}
             </button>
           </form>
-          <p className="text-center text-xs mt-6 text-[#6B7690]">
-            Demo accounts: admin@nexorapos.com / admin123 · cashier@nexorapos.com / cashier123
+
+          <p className="nx-login-footer">
+            New company? <Link to="/signup" className="nx-login-link">Start Free Trial</Link>
+            <span className="nx-login-sep" aria-hidden>·</span>
+            <Link to="/" className="nx-login-link">Back to home</Link>
           </p>
         </div>
       </div>
