@@ -1,0 +1,109 @@
+{
+  "success": true,
+  "checks": {
+    "branches": {
+      "ok": true
+    },
+    "profiles": {
+      "ok": true
+    },
+    "categories": {
+      "ok": true
+    },
+    "products": {
+      "ok": true
+    },
+    "customers": {
+      "ok": true
+    },
+    "customer_payments": {
+      "ok": true
+    },
+    "suppliers": {
+      "ok": true
+    },
+    "supplier_payments": {
+      "ok": true
+    },
+    "sales": {
+      "ok": true
+    },
+    "sale_items": {
+      "ok": true
+    },
+    "held_sales": {
+      "ok": true
+    },
+    "purchases": {
+      "ok": true
+    },
+    "purchase_items": {
+      "ok": true
+    },
+    "purchase_returns": {
+      "ok": true
+    },
+    "expense_categories": {
+      "ok": true
+    },
+    "expenses": {
+      "ok": true
+    },
+    "stock_transfers": {
+      "ok": true
+    },
+    "settings": {
+      "ok": true
+    },
+    "permissions": {
+      "ok": true
+    },
+    "audit_log": {
+      "ok": true
+    },
+    "subscription": {
+      "ok": true
+    },
+    "companies": {
+      "ok": true
+    },
+    "company_subscriptions": {
+      "ok": true
+    },
+    "company_settings": {
+      "ok": true
+    },
+    "brands": {
+      "ok": true
+    },
+    "units": {
+      "ok": true
+    },
+    "warehouses": {
+      "ok": true
+    },
+    "stock_movements": {
+      "ok": true
+    },
+    "invoice_verifications": {
+      "ok": true
+    },
+    "pos_create_sale": {
+      "ok": true,
+      "missing": false,
+      "code": "22023"
+    },
+    "products_sku_tax_rate": {
+      "ok": false,
+      "code": "42703",
+      "missing": true,
+      "message": "column products.sku does not exist"
+    },
+    "suppliers_tax_notes": {
+      "ok": false,
+      "code": "42703",
+      "missing": true,
+      "message": "column suppliers.tax_number does not exist"
+    }
+  }
+}

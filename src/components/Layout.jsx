@@ -1,135 +1,571 @@
-import { useEffect } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, ShoppingCart, Package, Boxes, Users, Truck,
-  ShoppingBag, BarChart3, Receipt, Settings, Search, Bell,
-  ChevronDown, LogOut, Store, History, Wifi, WifiOff, ShieldCheck,
+  LayoutDashboard,
+  ShoppingCart,
+  Package,
+  Layers3,
+  Boxes,
+  Barcode,
+  ShoppingBag,
+  ReceiptText,
+  Users,
+  Truck,
+  Receipt,
+  BarChart3,
+  ShieldCheck,
+  Settings,
+  CreditCard,
+  LogOut,
+  Store,
+  Menu,
+  Moon,
+  Sun,
+  Building2,
+  CircleDollarSign,
+  Globe2,
+  ScrollText,
+  SlidersHorizontal,
+  Search,
+  HardDrive,
+  KeyRound,
+  ClipboardList,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Bell,
+  ChevronDown,
+  Home,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { api, isMockMode } from "../lib/api";
-import { useOnlineStatus } from "../lib/useOnlineStatus";
+import { useTheme } from "../context/ThemeContext";
+import { api } from "../lib/api";
+import { isOwner, isPlatformOwner, roleLabel } from "../lib/rbac";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+const SIDEBAR_KEY = "nexora_sidebar_collapsed";
+
+/**
+ * Primary company sidebar — single clean list (permission-filtered).
+ * Sales → POS register; Branches → platform branches page when available.
+ */
+const PRIMARY_NAV = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, module: "dashboard" },
-  { to: "/pos", label: "POS Sales", icon: ShoppingCart, module: "pos" },
+  { to: "/pos", label: "Sales", icon: ShoppingCart, module: "pos" },
   { to: "/products", label: "Products", icon: Package, module: "products" },
-  { to: "/inventory", label: "Inventory", icon: Boxes, module: "inventory" },
-  { to: "/sales", label: "Sales History", icon: History, module: "sales" },
-  { to: "/customers", label: "Customers", icon: Users, module: "customers" },
-  { to: "/suppliers", label: "Suppliers", icon: Truck, module: "suppliers" },
-  { to: "/purchases", label: "Purchases", icon: ShoppingBag, module: "purchases" },
+  { to: "/categories", label: "Categories", icon: Layers3, module: "categories" },
+  { to: "/barcode", label: "Barcode", icon: Barcode, module: "barcode" },
   { to: "/reports", label: "Reports", icon: BarChart3, module: "reports" },
-  { to: "/expenses", label: "Expenses", icon: Receipt, module: "expenses" },
-  { to: "/audit", label: "Audit Log", icon: ShieldCheck, module: "audit" },
+  { to: "/purchases", label: "Purchases", icon: ShoppingBag, module: "purchases" },
+  { to: "/suppliers", label: "Suppliers", icon: Truck, module: "suppliers" },
+  { to: "/customers", label: "Customers", icon: Users, module: "customers" },
+  { to: "/inventory", label: "Inventory", icon: Boxes, module: "inventory" },
+  { to: "/branches", label: "Branches", icon: Building2, module: "branches" },
+  { to: "/users", label: "Users", icon: Users, module: "users" },
   { to: "/settings", label: "Settings", icon: Settings, module: "settings" },
 ];
 
+/** Light secondary links kept out of the primary wireframe list */
+const SECONDARY_NAV = [
+  { to: "/sales", label: "Sale history", icon: ReceiptText, module: "sales" },
+  { to: "/expenses", label: "Expenses", icon: Receipt, module: "expenses" },
+  { to: "/roles", label: "Roles", icon: ShieldCheck, module: "roles" },
+  { to: "/audit", label: "Audit", icon: ScrollText, module: "audit_logs" },
+  { to: "/subscription", label: "Plan", icon: CreditCard, module: "subscription", ownerOnly: true },
+  { to: "/notifications", label: "Notifications", icon: Bell, module: "dashboard" },
+];
+
+const NAV_SECTIONS = [
+  { id: "main", label: "Menu", items: PRIMARY_NAV },
+  { id: "more", label: "More", items: SECONDARY_NAV },
+];
+
+const PLATFORM_SECTIONS = [
+  {
+    id: "platform",
+    label: "Platform",
+    items: [
+      { to: "/platform", label: "Dashboard", icon: LayoutDashboard, module: "owner_management" },
+      { to: "/platform/companies", label: "Companies", icon: Building2, module: "company_accounts" },
+      { to: "/platform/subscriptions", label: "Subscriptions", icon: CreditCard, module: "subscriptions" },
+      { to: "/platform/pricing", label: "Pricing", icon: SlidersHorizontal, module: "plans" },
+      { to: "/platform/users", label: "Users", icon: Users, module: "users" },
+      { to: "/platform/branches", label: "Branches", icon: Building2, module: "branches" },
+      { to: "/platform/roles", label: "Roles", icon: ShieldCheck, module: "roles" },
+      { to: "/platform/approvals", label: "Approvals", icon: ClipboardList, module: "platform_approvals" },
+      { to: "/platform/analytics", label: "Reports", icon: BarChart3, module: "platform_analytics" },
+      { to: "/platform/settings", label: "Settings", icon: Settings, module: "platform_settings" },
+      { to: "/platform/audit", label: "Audit", icon: ScrollText, module: "platform_audit" },
+      { to: "/platform/backup", label: "Backup", icon: HardDrive, module: "backup" },
+      { to: "/platform/payments", label: "Payments", icon: CircleDollarSign, module: "billing" },
+      { to: "/platform/domains", label: "Domains", icon: Globe2, module: "domains" },
+      { to: "/platform/search", label: "Search", icon: Search, module: "owner_management" },
+    ],
+  },
+];
+
+const ALL_NAV_ITEMS = [...NAV_SECTIONS, ...PLATFORM_SECTIONS].flatMap((section) => section.items);
+
+const EXTRA_TITLES = {
+  "/change-password": "Change Password",
+  "/settings/login-security": "Login & Security",
+  "/notifications": "Notifications",
+};
+
 function initials(name = "") {
-  return name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
+  return name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+function resolvePageMeta(pathname, search, platformMode, user) {
+  const withQuery = `${pathname}${search || ""}`;
+  if (pathname === "/settings" && search.includes("tab=backup")) {
+    return { title: "Backup & Restore", subtitle: null, crumbs: ["Governance", "Backup"] };
+  }
+  if (pathname === "/dashboard") {
+    return {
+      title: "Dashboard",
+      subtitle: null,
+      crumbs: ["Menu", "Dashboard"],
+    };
+  }
+  const exact = ALL_NAV_ITEMS.find((item) => item.to === withQuery || item.to === pathname);
+  if (exact) {
+    const section = (platformMode ? PLATFORM_SECTIONS : NAV_SECTIONS).find((s) =>
+      s.items.some((item) => item.to === exact.to)
+    );
+    return {
+      title: exact.label,
+      subtitle: null,
+      crumbs: [section?.label || (platformMode ? "Platform" : "Workspace"), exact.label],
+    };
+  }
+  const nested = ALL_NAV_ITEMS
+    .filter((item) => item.to !== "/" && pathname.startsWith(item.to.split("?")[0]))
+    .sort((a, b) => b.to.length - a.to.length)[0];
+  if (nested) {
+    return { title: nested.label, subtitle: null, crumbs: [platformMode ? "Platform" : "Workspace", nested.label] };
+  }
+  if (EXTRA_TITLES[pathname]) {
+    return { title: EXTRA_TITLES[pathname], subtitle: null, crumbs: ["Account", EXTRA_TITLES[pathname]] };
+  }
+  const segment = pathname.split("/").filter(Boolean).pop() || "Home";
+  const title = segment.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return { title, subtitle: null, crumbs: [platformMode ? "Platform" : "Workspace", title] };
+}
+
+function NavSections({ sections, collapsed, navIsActive, onNavigate }) {
+  return sections.map((section) => (
+    <div key={section.id} className="nx-nav-section">
+      <div className="nx-nav-section-label">{section.label}</div>
+      {section.items.map(({ to, label, icon: Icon, badge }) => (
+        <NavLink
+          key={`${to}-${label}`}
+          to={to}
+          end={to === "/reports" || to === "/platform"}
+          title={collapsed ? label : undefined}
+          className={() => cn("nx-nav-link", navIsActive(to) && "is-active")}
+          onClick={onNavigate}
+        >
+          <Icon size={17} strokeWidth={2} aria-hidden />
+          <span className="nx-nav-label truncate flex-1">{label}</span>
+          {badge && !collapsed && (
+            <Badge variant="default" className="nx-nav-badge h-5 px-1.5 text-[10px]">
+              {badge}
+            </Badge>
+          )}
+        </NavLink>
+      ))}
+    </div>
+  ));
 }
 
 export default function Layout() {
-  const { user, logout, can } = useAuth();
+  const { user, logout, can, impersonation, stopImpersonation } = useAuth();
+  const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
   const location = useLocation();
-  const online = useOnlineStatus();
+  const searchRef = useRef(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [settings, setSettings] = useState({});
+  const [branches, setBranches] = useState([]);
+  const [headerSearch, setHeaderSearch] = useState("");
+  const [notifications, setNotifications] = useState({ items: [], unread: 0 });
 
-  const visibleNav = NAV_ITEMS.filter((n) => can(n.module, "view"));
+  const platformMode = isPlatformOwner(user?.role) && !impersonation;
+  const companyOwner = isOwner(user?.role);
+  const isPosRoute = location.pathname === "/pos";
+  const pageMeta = useMemo(
+    () => resolvePageMeta(location.pathname, location.search, platformMode, user),
+    [location.pathname, location.search, platformMode, user]
+  );
 
-  // Background sync: the main process runs its own 60s timer once enabled,
-  // and we also nudge it immediately whenever the browser regains connectivity
-  // so reconnecting doesn't sit idle waiting for the next tick.
+  const visibleSections = useMemo(() => {
+    const source = platformMode ? PLATFORM_SECTIONS : NAV_SECTIONS;
+    return source
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => {
+          if (item.ownerOnly && !companyOwner) return false;
+          if (item.platformOnly && !platformMode) return false;
+          return can(item.module, "view");
+        }),
+      }))
+      .filter((section) => section.items.length > 0);
+  }, [can, platformMode, companyOwner]);
+
   useEffect(() => {
-    api.sync?.setAutoSync?.(true);
-    return () => api.sync?.setAutoSync?.(false);
-  }, []);
+    if (!platformMode) {
+      api.settings.getAll().then(setSettings);
+      api.branches?.getAll?.().then(setBranches);
+      api.notifications?.list?.()
+        .then((result) => {
+          if (result?.items) setNotifications({ items: result.items, unread: result.unread || result.items.length });
+          else if (Array.isArray(result)) setNotifications({ items: result, unread: result.length });
+        })
+        .catch(() => null);
+    }
+  }, [platformMode, user?.company_id]);
 
   useEffect(() => {
-    if (online) api.sync?.onConnectionRestored?.();
-  }, [online]);
+    setMobileOpen(false);
+  }, [location.pathname, location.search]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+
+  const branchName =
+    branches.find((branch) => branch.id === Number(user?.branch_id || settings.default_branch_id))?.name ||
+    "Main Branch";
+
+  const handleLogout = async () => {
+    await logout();
+    navigate("/login", { replace: true });
+  };
+
+  const navIsActive = (to) => {
+    const [path, query = ""] = to.split("?");
+    if (path === "/settings/login-security") {
+      return location.pathname.startsWith("/settings/login-security");
+    }
+    if (path === "/settings" && query.includes("tab=backup")) {
+      return location.pathname === "/settings" && location.search.includes("tab=backup");
+    }
+    if (path === "/settings") {
+      return (
+        location.pathname === "/settings" &&
+        !location.search.includes("tab=backup") &&
+        !location.pathname.includes("login-security")
+      );
+    }
+    if (path === "/reports" || path === "/platform") {
+      return location.pathname === path;
+    }
+    return location.pathname === path || location.pathname.startsWith(`${path}/`);
+  };
+
+  const runHeaderSearch = (event) => {
+    event.preventDefault();
+    const query = headerSearch.trim();
+    if (!query) {
+      if (can("products", "view")) navigate("/products");
+      return;
+    }
+    const match = ALL_NAV_ITEMS.find((item) => item.label.toLowerCase().includes(query.toLowerCase()));
+    if (match && can(match.module, "view")) {
+      navigate(match.to);
+      setHeaderSearch("");
+      return;
+    }
+    if (can("products", "view")) {
+      navigate("/products");
+    }
+  };
+
+  const sidebarBody = (
+    <>
+      <div className="nx-brand-bar">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="nx-brand-mark" aria-hidden>
+            <Store size={18} />
+          </div>
+          <div className="nx-brand-copy min-w-0">
+            <div className="nx-brand-name truncate">Nexora</div>
+            <div className="nx-brand-sub">POS Enterprise</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="nx-aside-extra border-b border-app px-3.5 py-3">
+        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.1em] text-app-muted">
+          <Building2 size={13} aria-hidden />
+          {platformMode ? "Platform" : user?.company?.code || "Company"}
+        </div>
+        <div className="mt-1 truncate text-[13px] font-semibold">
+          {platformMode ? "All accounts" : branchName}
+        </div>
+      </div>
+
+      <nav className="nx-aside-nav flex-1 overflow-y-auto px-1.5 py-2" aria-label="Modules">
+        <NavSections
+          sections={visibleSections}
+          collapsed={collapsed}
+          navIsActive={navIsActive}
+          onNavigate={() => setMobileOpen(false)}
+        />
+      </nav>
+
+      <div className="nx-aside-footer border-t border-app p-2.5">
+        <button
+          type="button"
+          className="nx-nav-link mb-1 w-full"
+          onClick={() => setCollapsed((value) => !value)}
+          aria-pressed={collapsed}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+          <span className="nx-nav-label">{collapsed ? "Expand" : "Collapse"}</span>
+        </button>
+
+        <button type="button" onClick={handleLogout} className="nx-nav-link nx-logout-link w-full">
+          <LogOut size={17} aria-hidden />
+          <span className="nx-nav-label">Sign out</span>
+        </button>
+      </div>
+    </>
+  );
 
   return (
-    <div className="min-h-screen flex bg-[#F3F6FB]">
-      {isMockMode && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-amber-500 text-white text-xs text-center py-1">
-          Mock data mode — run <code>npm run electron:dev</code> for the real database
-        </div>
-      )}
+    <div className={cn("nx-shell bg-app text-app-text", collapsed && "is-sidebar-collapsed")}>
+      <a href="#main-content" className="nx-skip-link">
+        Skip to main content
+      </a>
 
-      <aside className="w-60 shrink-0 flex flex-col bg-[#0B1C3D]">
-        <div className="h-16 flex items-center gap-2.5 px-5 border-b border-white/10">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-[#2563EB]">
-            <Store size={16} className="text-white" />
-          </div>
-          <span className="text-white font-bold tracking-wide text-[15px]">NEXORA POS</span>
-        </div>
-
-        <nav className="flex-1 overflow-y-auto py-3 px-2.5 space-y-0.5">
-          {visibleNav.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                `w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-all duration-150 ${
-                  isActive ? "bg-[#2563EB] text-white font-semibold" : "text-[#AEB9D4] hover:bg-white/5 font-medium"
-                }`
-              }
-            >
-              <Icon size={16} /> {label}
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="p-3 border-t border-white/10">
-          <div className="flex items-center gap-2.5 px-2 py-2">
-            <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold bg-[#3B5AA6]">
-              {initials(user?.name)}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-white text-xs font-medium truncate">{user?.name}</div>
-              <div className="text-[#8B96B8] text-[11px] capitalize">{user?.role}</div>
-            </div>
-            <button onClick={logout} className="text-[#8B96B8] hover:text-white" title="Log out">
-              <LogOut size={15} />
-            </button>
-          </div>
-        </div>
+      <aside
+        className={cn("nx-shell-aside hidden lg:flex", collapsed && "is-collapsed")}
+        aria-label="Primary navigation"
+      >
+        {sidebarBody}
       </aside>
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-16 shrink-0 bg-white border-b border-[#E4E9F2] flex items-center justify-between px-6">
-          <div>
-            <div className="text-xs text-[#6B7690]">Nexora Supermarket — Westlands</div>
-            <div className="text-sm font-semibold text-[#1B2439]">
-              {NAV_ITEMS.find((n) => location.pathname === n.to)?.label || "NEXORA POS"}
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <div
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
-              style={{ color: online ? "#12A150" : "#DC2626", backgroundColor: online ? "#E8FAEF" : "#FDECEC" }}
-              title={online ? "Online — Firebase sync can run" : "Offline — all sales are still saved locally"}
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <SheetContent side="left" className="w-[248px] p-0 lg:hidden [&>button]:text-[var(--sidebar-muted)]">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Navigation</SheetTitle>
+          </SheetHeader>
+          <div className="nx-shell-nav flex h-full flex-col">{sidebarBody}</div>
+        </SheetContent>
+      </Sheet>
+
+      <div className="nx-shell-main">
+        {impersonation && (
+          <div className="sticky top-0 z-40 flex flex-wrap items-center justify-center gap-3 bg-amber-400 px-4 py-2 text-sm font-semibold text-amber-950">
+            <span>Impersonating {user?.name}</span>
+            <button
+              type="button"
+              onClick={async () => {
+                const result = await stopImpersonation();
+                if (result.success) navigate("/platform", { replace: true });
+              }}
+              className="rounded-lg bg-amber-950 px-3 py-1 text-xs text-white"
             >
-              {online ? <Wifi size={12} /> : <WifiOff size={12} />}
-              {online ? "Online" : "Offline"}
-            </div>
-            <div className="relative hidden md:block">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B7690]" />
-              <input placeholder="Quick search…" className="pl-9 pr-3 py-1.5 rounded-lg border border-[#E4E9F2] text-sm w-56" />
-            </div>
-            <button className="relative text-[#4B5675]">
-              <Bell size={18} />
-              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#DC2626]" />
+              Stop Impersonation
             </button>
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold bg-[#2563EB]">
-                {initials(user?.name)}
+          </div>
+        )}
+
+        <header className="nx-topbar">
+          <div className="nx-topbar-inner">
+            <div className="nx-topbar-brand">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="nx-icon-btn lg:hidden"
+                onClick={() => setMobileOpen(true)}
+                aria-label="Open navigation"
+              >
+                <Menu size={18} />
+              </Button>
+              <div className="nx-topbar-logo hidden sm:flex" title="Nexora POS Enterprise" aria-hidden>
+                <Store size={15} />
               </div>
-              <ChevronDown size={14} className="text-[#6B7690]" />
+              <span className="nx-topbar-brand-label hidden md:inline">Nexora</span>
+            </div>
+
+            <form className="nx-topbar-search" onSubmit={runHeaderSearch} role="search">
+              <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-app-muted" aria-hidden />
+              <Input
+                ref={searchRef}
+                value={headerSearch}
+                onChange={(event) => setHeaderSearch(event.target.value)}
+                placeholder="Search products, customers, invoices…"
+                aria-label="Search products, customers, invoices"
+                className="h-9 border-[var(--app-border)] bg-[var(--app-panel-muted)] pl-10 shadow-none focus-visible:bg-[var(--app-panel)]"
+              />
+            </form>
+
+            <div className="nx-topbar-actions">
+              {!platformMode && (
+                <div
+                  className="nx-branch-select flex items-center gap-2"
+                  title="Current branch"
+                  aria-label={`Current branch: ${branchName}`}
+                >
+                  <Building2 size={15} className="text-app-muted" aria-hidden />
+                  <span className="truncate">{branchName}</span>
+                </div>
+              )}
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="outline" size="icon" className="nx-icon-btn relative" aria-label="Notifications">
+                    <Bell size={17} aria-hidden />
+                    {notifications.unread > 0 && (
+                      <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[10px] font-bold text-white">
+                        {notifications.unread > 9 ? "9+" : notifications.unread}
+                      </span>
+                    )}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-80">
+                  <DropdownMenuLabel>Notifications</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {notifications.items.length === 0 ? (
+                    <div className="px-3 py-4 text-sm text-muted-foreground">
+                      You are all caught up. Operational alerts appear here when stock is low.
+                    </div>
+                  ) : (
+                    notifications.items.map((item) => (
+                      <DropdownMenuItem
+                        key={item.id}
+                        className="flex flex-col items-start gap-0.5 py-2"
+                        onClick={() => item.href && navigate(item.href)}
+                      >
+                        <span className="text-sm font-medium">{item.title}</span>
+                        <span className="text-xs text-muted-foreground">{item.body}</span>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                  {can("audit_logs", "view") && (
+                    <DropdownMenuItem onClick={() => navigate("/audit")}>
+                      <ScrollText size={15} aria-hidden />
+                      Open audit trail
+                    </DropdownMenuItem>
+                  )}
+                  {can("inventory", "view") && (
+                    <DropdownMenuItem onClick={() => navigate("/inventory")}>
+                      <Boxes size={15} aria-hidden />
+                      Inventory alerts
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="nx-icon-btn"
+                onClick={toggleTheme}
+                aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+                title={theme === "light" ? "Dark mode" : "Light mode"}
+              >
+                {theme === "light" ? <Moon size={17} aria-hidden /> : <Sun size={17} aria-hidden />}
+              </Button>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button type="button" className="nx-user-chip" aria-label="User profile menu">
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="bg-brand/15 text-brand">{initials(user?.name)}</AvatarFallback>
+                    </Avatar>
+                    <span className="hidden min-w-0 text-left md:block">
+                      <span className="block truncate text-sm font-semibold leading-tight">{user?.name}</span>
+                      <span className="block truncate text-[12px] leading-tight text-app-muted">{roleLabel(user?.role)}</span>
+                    </span>
+                    <ChevronDown size={14} className="text-app-muted" aria-hidden />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <div className="px-3 py-2">
+                    <div className="truncate text-sm font-semibold">{user?.name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{user?.email || roleLabel(user?.role)}</div>
+                  </div>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => navigate(companyOwner ? "/settings/login-security" : "/change-password")}
+                  >
+                    <KeyRound size={16} aria-hidden />
+                    {companyOwner ? "Login & Security" : "Change password"}
+                  </DropdownMenuItem>
+                  {can("settings", "view") && (
+                    <DropdownMenuItem onClick={() => navigate("/settings")}>
+                      <Settings size={16} aria-hidden />
+                      Workspace
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-danger focus:text-danger" onClick={handleLogout}>
+                    <LogOut size={16} aria-hidden />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-6">
+        {!isPosRoute && (
+          <div className="nx-page-chrome" aria-label="Page header">
+            <div className="nx-page-chrome-inner">
+              <div className="nx-page-chrome-copy min-w-0">
+                <nav className="nx-breadcrumb" aria-label="Breadcrumb">
+                  <Home size={13} className="nx-breadcrumb-home" aria-hidden />
+                  {pageMeta.crumbs.map((crumb, index) => (
+                    <span key={`${crumb}-${index}`} className="nx-breadcrumb-item">
+                      {index > 0 && <span className="nx-breadcrumb-sep" aria-hidden>/</span>}
+                      <span className={index === pageMeta.crumbs.length - 1 ? "is-current" : ""}>{crumb}</span>
+                    </span>
+                  ))}
+                </nav>
+                <h1 className="nx-page-chrome-title">{pageMeta.title}</h1>
+                {pageMeta.subtitle && <p className="nx-page-chrome-sub">{pageMeta.subtitle}</p>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <main id="main-content" className={cn("nx-main-content", isPosRoute && "is-pos")} tabIndex={-1}>
           <Outlet />
         </main>
       </div>

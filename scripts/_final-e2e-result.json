@@ -1,0 +1,109 @@
+{
+  "generated_at": "2026-07-20T15:41:53.530Z",
+  "base": "https://www.httpsnexorapos.com",
+  "assets": [
+    "assets/index-D7VaJgtU.js",
+    "assets/react-vendor-DmLtxZBq.js",
+    "assets/pdf-CS3kvse2.js",
+    "assets/supabase-Bmi-Q25R.js",
+    "assets/index-CjGe6g12.css"
+  ],
+  "scorecard": [
+    {
+      "test": "1. Login",
+      "status": "PASS",
+      "evidence": "platform super admin; user=fd2dcfac…"
+    },
+    {
+      "test": "2. Registration",
+      "status": "PASS",
+      "evidence": "public signUp rate-limited; /api/admin-create-user HTTP 200; user=28a8a1c6-a1a5-44fb-aa55-f8aa40d068ca; signIn=true"
+    },
+    {
+      "test": "3. Create Company",
+      "status": "PASS",
+      "evidence": "hydrate=200; getById=200; id=1; name=E2E Co 1784562074977"
+    },
+    {
+      "test": "4. Create Branch",
+      "status": "PASS",
+      "evidence": "HTTP 200; id=6; err="
+    },
+    {
+      "test": "5. Add Supplier",
+      "status": "PASS",
+      "evidence": "HTTP 200; id=6; "
+    },
+    {
+      "test": "6. Add Customer",
+      "status": "PASS",
+      "evidence": "HTTP 200; id=5; "
+    },
+    {
+      "test": "7. Add Product",
+      "status": "PASS",
+      "evidence": "HTTP 200; id=11; stock=25; barcode=E2E1784562074977; "
+    },
+    {
+      "test": "8. Barcode Scan",
+      "status": "PASS",
+      "evidence": "HTTP 200; id=11; name=E2E Product 1784562074977"
+    },
+    {
+      "test": "9. POS Sale",
+      "status": "FAIL",
+      "evidence": "HTTP 500; id=undefined; receipt=undefined; err=insert or update on table \"sales\" violates foreign key constraint \"sales_user_id_fkey\""
+    },
+    {
+      "test": "10. Stock Reduction",
+      "status": "FAIL",
+      "evidence": "before=25; after=25; expected=23"
+    },
+    {
+      "test": "11. Invoice Generation",
+      "status": "FAIL",
+      "evidence": "sale_id=undefined; receipt_no=undefined; invoice_public=0; found=false; body=null"
+    },
+    {
+      "test": "12. Receipt Printing",
+      "status": "FAIL",
+      "evidence": "No sale to print"
+    },
+    {
+      "test": "13. Dashboard Statistics",
+      "status": "PASS",
+      "evidence": "summary=200 keys=today_count,today_total,month_count,month_total; trend=200 n=1; inventory=200"
+    },
+    {
+      "test": "14. Reports",
+      "status": "PASS",
+      "evidence": "sales=200; inventory=200; pnl=200; sales_err="
+    },
+    {
+      "test": "15. User Roles & Permissions",
+      "status": "PASS",
+      "evidence": "role=admin; unauth_create=401; matrix=200; cashier_branch=200/FORBIDDEN; cashier_matrix=200; matrixDenied=true"
+    }
+  ],
+  "summary": {
+    "pass": 11,
+    "fail": 4,
+    "skip": 0,
+    "fullGo": false
+  },
+  "extra": {
+    "saleResult": {
+      "status": 500,
+      "body": {
+        "success": false,
+        "error": "insert or update on table \"sales\" violates foreign key constraint \"sales_user_id_fkey\"",
+        "code": "POS_ERROR"
+      },
+      "headers": {}
+    },
+    "stockBefore": 25,
+    "stockAfter": 25,
+    "productId": 11,
+    "companyId": 1
+  }
+}

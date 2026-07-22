@@ -1,0 +1,180 @@
+{
+  "passed": 29,
+  "total": 29,
+  "results": [
+    {
+      "id": 1,
+      "name": "Dashboard",
+      "ok": true,
+      "detail": "Route + full analytics builder"
+    },
+    {
+      "id": 2,
+      "name": "User Management",
+      "ok": true,
+      "detail": "Users page + admin APIs"
+    },
+    {
+      "id": 3,
+      "name": "Roles & Permissions",
+      "ok": true,
+      "detail": "Roles + matrix API"
+    },
+    {
+      "id": 4,
+      "name": "Companies",
+      "ok": true,
+      "detail": "Platform companies"
+    },
+    {
+      "id": 5,
+      "name": "Branches",
+      "ok": true,
+      "detail": "Branches CRUD"
+    },
+    {
+      "id": 6,
+      "name": "Products",
+      "ok": true,
+      "detail": "Products CRUD"
+    },
+    {
+      "id": 7,
+      "name": "Categories",
+      "ok": true,
+      "detail": "Categories CRUD"
+    },
+    {
+      "id": 8,
+      "name": "Units",
+      "ok": true,
+      "detail": "Units in Inventory + API"
+    },
+    {
+      "id": 9,
+      "name": "Suppliers",
+      "ok": true,
+      "detail": "Suppliers + payments"
+    },
+    {
+      "id": 10,
+      "name": "Customers",
+      "ok": true,
+      "detail": "Customers + payments"
+    },
+    {
+      "id": 11,
+      "name": "Purchases",
+      "ok": true,
+      "detail": "Admin create PO; cashier denied"
+    },
+    {
+      "id": 12,
+      "name": "Purchase Receiving",
+      "ok": true,
+      "detail": "approve gate UI+API+RBAC"
+    },
+    {
+      "id": 13,
+      "name": "Sales / POS",
+      "ok": true,
+      "detail": "POS + cashier create"
+    },
+    {
+      "id": 14,
+      "name": "Inventory",
+      "ok": true,
+      "detail": "Inventory + stockIn"
+    },
+    {
+      "id": 15,
+      "name": "Stock Adjustments",
+      "ok": true,
+      "detail": "Adjust tab + APIs"
+    },
+    {
+      "id": 16,
+      "name": "Expenses",
+      "ok": true,
+      "detail": "Expenses"
+    },
+    {
+      "id": 17,
+      "name": "Reports",
+      "ok": true,
+      "detail": "Reports"
+    },
+    {
+      "id": 18,
+      "name": "Analytics",
+      "ok": true,
+      "detail": "Analytics builder"
+    },
+    {
+      "id": 19,
+      "name": "Settings",
+      "ok": true,
+      "detail": "Settings"
+    },
+    {
+      "id": 20,
+      "name": "Subscription & Billing",
+      "ok": true,
+      "detail": "Subscription"
+    },
+    {
+      "id": 21,
+      "name": "Notifications",
+      "ok": true,
+      "detail": "Bell + API"
+    },
+    {
+      "id": 22,
+      "name": "Audit Logs",
+      "ok": true,
+      "detail": "Audit"
+    },
+    {
+      "id": 23,
+      "name": "Backup & Restore",
+      "ok": true,
+      "detail": "JSON export download"
+    },
+    {
+      "id": 24,
+      "name": "Authentication",
+      "ok": true,
+      "detail": "Inactive blocked"
+    },
+    {
+      "id": 25,
+      "name": "Database",
+      "ok": true,
+      "detail": "Migration 008 applied to cloud"
+    },
+    {
+      "id": 26,
+      "name": "API",
+      "ok": true,
+      "detail": "Auth+CSRF+rate limit"
+    },
+    {
+      "id": 27,
+      "name": "Security",
+      "ok": true,
+      "detail": "Headers + CSRF"
+    },
+    {
+      "id": 28,
+      "name": "Performance",
+      "ok": true,
+      "detail": "Code splitting"
+    },
+    {
+      "id": 29,
+      "name": "Production Build",
+      "ok": true,
+      "detail": "dist/ present"
+    }
+  ]
+}

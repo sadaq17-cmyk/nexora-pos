@@ -1,0 +1,14 @@
+{
+  "status": "FAIL",
+  "applied": false,
+  "before": null,
+  "after": null,
+  "mgmt": {
+    "ok": false,
+    "reason": "NO_ACCESS_TOKEN"
+  },
+  "psql": {
+    "ok": false,
+    "reason": "NO_DB_URL"
+  }
+}

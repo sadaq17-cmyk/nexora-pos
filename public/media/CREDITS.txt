@@ -1,0 +1,10 @@
+Nexora POS public media credits
+================================
+Industry and In Action photographs are royalty-free images from Unsplash and Pexels,
+used under their standard licenses for commercial websites. No watermarked, AI-generated,
+or copyrighted stock UI screenshots are used for Product Screenshots or Feature Spotlights.
+
+Product Screenshots and Feature Spotlights render the Nexora POS product interface
+(via in-app UI mockups matching the live product chrome).
+
+Trusted By and Testimonials remain empty until real customer assets and permission exist.

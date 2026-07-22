@@ -1,15 +1,26 @@
-import { mockApi } from "./mockApi";
+import { supabaseApi } from "./supabaseApi";
 
 const hasElectronApi = typeof window !== "undefined" && window.api;
 
-if (!hasElectronApi) {
-  // Expected when running `npm run dev` directly in a browser tab.
-  // Use `npm run electron:dev` to get the real SQLite-backed API.
-  console.warn(
-    "[NEXORA POS] window.api not found — running in mock mode with in-memory data. " +
-      "Use `npm run electron:dev` for the real, persisted app."
-  );
+/**
+ * Production web builds always use the Supabase-backed data plane.
+ * Browser localStorage mockApi is DEV-only and requires an explicit flag.
+ * Vite eliminates the DEV branch from production bundles.
+ */
+let resolvedApi = hasElectronApi ? window.api : supabaseApi;
+
+if (
+  !hasElectronApi &&
+  import.meta.env.DEV &&
+  String(import.meta.env.VITE_USE_MOCK_API || "").toLowerCase() === "true"
+) {
+  const { mockApi } = await import("./mockApi");
+  resolvedApi = mockApi;
+  console.info("[NEXORA POS] DEV mockApi (localStorage) enabled via VITE_USE_MOCK_API=true");
+} else if (!hasElectronApi) {
+  console.info("[NEXORA POS] Using Supabase production data plane (/api/pos).");
 }
 
-export const api = hasElectronApi ? window.api : mockApi;
-export const isMockMode = !hasElectronApi;
+export const api = resolvedApi;
+export const isMockMode = Boolean(resolvedApi?.__isMock);
+export const isProductionDataPlane = !hasElectronApi && !isMockMode;

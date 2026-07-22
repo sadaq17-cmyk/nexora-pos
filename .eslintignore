@@ -1,0 +1,12 @@
+dist
+node_modules
+release
+.vercel
+.vite
+
+# Config / tooling files (not part of the src React app)
+vite.config.js
+tailwind.config.js
+postcss.config.js
+.eslintrc.cjs
+scripts

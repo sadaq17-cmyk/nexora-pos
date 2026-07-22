@@ -2054,6 +2054,38 @@ tbody tr:last-child td { border-bottom: 0; }
   padding: 16px 16px 14px;
 }
 
+.nx-insights-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nx-insight-item {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--app-panel-muted, var(--app-panel));
+}
+
+.nx-insight-item.tone-success {
+  border-color: color-mix(in srgb, var(--success, #12A150) 35%, var(--app-border));
+}
+
+.nx-insight-item.tone-warning {
+  border-color: color-mix(in srgb, #B45309 35%, var(--app-border));
+}
+
+.nx-insight-item.tone-danger {
+  border-color: color-mix(in srgb, var(--danger, #DC2626) 35%, var(--app-border));
+}
+
+.nx-insight-item.tone-brand {
+  border-color: color-mix(in srgb, var(--brand) 30%, var(--app-border));
+}
+
 /* Premium auth login — clean enterprise card */
 .nx-login-page {
   position: relative;

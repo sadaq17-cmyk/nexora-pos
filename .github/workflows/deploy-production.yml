@@ -1,0 +1,153 @@
+# Nexora POS Enterprise — Automatic Production Deploy
+#
+# Triggers on push to `main` (approved merge) and manual workflow_dispatch.
+# Fail-fast: lint or build failure blocks the Vercel production deploy.
+#
+# Required GitHub repository secrets (Settings → Secrets and variables → Actions):
+#   VERCEL_TOKEN       — Vercel account token (https://vercel.com/account/tokens)
+#   VERCEL_ORG_ID      — from .vercel/project.json → orgId  (do NOT hardcode tokens)
+#   VERCEL_PROJECT_ID  — from .vercel/project.json → projectId
+#
+# Never commit tokens. org/project IDs are non-secret identifiers but are still
+# injected via secrets so the workflow stays portable across environments.
+
+name: Deploy Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  lint-build-deploy:
+    name: Lint, Build, Deploy, Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      # ── Deploy (only reached if lint + build succeeded) ─────────
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Pull Vercel production env
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Build for Vercel (prebuilt)
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to Vercel Production
+        id: deploy
+        run: |
+          set -euo pipefail
+          URL=$(vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}")
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: ${URL}"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Verify production routes
+        id: verify
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          CUSTOM_DOMAIN: https://www.httpsnexorapos.com
+        run: |
+          set -euo pipefail
+          BASE="${DEPLOY_URL%/}"
+          ROUTES="/ /login /dashboard /pos /owner-management /users /reports"
+          FAIL=0
+          RESULTS=""
+
+          check() {
+            local url="$1"
+            local code=""
+            local attempt=1
+            while [ "$attempt" -le 3 ]; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 30 "$url" || echo "000")
+              if [ "$code" = "200" ]; then
+                echo "OK  ${code}  ${url}"
+                RESULTS="${RESULTS}| ${url} | ${code} | PASS |"$'\n'
+                return 0
+              fi
+              echo "Retry ${attempt}/3 → ${code}  ${url}"
+              sleep $((attempt * 2))
+              attempt=$((attempt + 1))
+            done
+            echo "FAIL ${code}  ${url}"
+            RESULTS="${RESULTS}| ${url} | ${code} | FAIL |"$'\n'
+            FAIL=1
+            return 1
+          }
+
+          for r in $ROUTES; do
+            if [ "$r" = "/" ]; then
+              check "${BASE}/" || true
+            else
+              check "${BASE}${r}" || true
+            fi
+          done
+
+          check "${CUSTOM_DOMAIN}/login" || true
+
+          {
+            echo "### Route checks"
+            echo ""
+            echo "| URL | Status | Result |"
+            echo "| --- | --- | --- |"
+            echo -n "$RESULTS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "One or more route checks failed."
+            exit 1
+          fi
+
+      - name: Write deployment summary
+        if: always()
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+          LINT_OK: ${{ job.status }}
+        run: |
+          {
+            echo "## Nexora POS — Production Deploy"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Timestamp (UTC) | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| Job status | ${{ job.status }} |"
+            echo "| Production URL | ${DEPLOY_URL:-n/a} |"
+            echo "| Custom domain | https://www.httpsnexorapos.com |"
+            echo "| Lint | must pass before deploy (blocked on failure) |"
+            echo "| Build | must pass before deploy (blocked on failure) |"
+            echo ""
+            echo "Secrets used (names only): \`VERCEL_TOKEN\`, \`VERCEL_ORG_ID\`, \`VERCEL_PROJECT_ID\`."
+          } >> "$GITHUB_STEP_SUMMARY"
