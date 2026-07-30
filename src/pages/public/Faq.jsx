@@ -7,15 +7,15 @@ export default function Faq() {
   return (
     <div>
       <Seo
-        title="FAQ — Nexora POS"
-        description="Answers about Nexora POS trials, industries, barcodes, roles, and how to reach support at support@httpsnexorapos.com."
+        title="FAQ — Nexora POS Pro"
+        description="Answers about Nexora POS Pro trials, industries, barcodes, roles, and how to reach support at support@httpsnexorapos.com."
       />
 
       <section className="nx-section" style={{ paddingTop: "3.5rem" }}>
         <div className="nx-section__label">FAQ</div>
         <h1 className="nx-section__title">Frequently asked questions</h1>
         <p className="nx-section__lead">
-          Quick answers about Nexora POS. For anything else, email{" "}
+          Quick answers about Nexora POS Pro. For anything else, email{" "}
           <a className="nx-support-link" href={SUPPORT_MAILTO}>
             {SUPPORT_EMAIL}
           </a>
@@ -38,7 +38,7 @@ export default function Faq() {
         <h2 className="nx-section__title">Still need help?</h2>
         <p className="nx-section__lead" style={{ marginLeft: "auto", marginRight: "auto" }}>
           Visit Help or Support, or write to{" "}
-          <a className="nx-support-link" href={supportMailto({ subject: "Nexora POS FAQ question" })}>
+          <a className="nx-support-link" href={supportMailto({ subject: "Nexora POS Pro FAQ question" })}>
             {SUPPORT_EMAIL}
           </a>
           .

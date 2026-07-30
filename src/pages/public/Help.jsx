@@ -25,8 +25,8 @@ export default function Help() {
   return (
     <div>
       <Seo
-        title="Help — Nexora POS"
-        description="Nexora POS help center. Get started with trials, packages, and store ops — or email support@httpsnexorapos.com."
+        title="Help — Nexora POS Pro"
+        description="Nexora POS Pro help center. Get started with trials, packages, and store ops — or email support@httpsnexorapos.com."
       />
 
       <section className="nx-section" style={{ paddingTop: "3.5rem" }}>
@@ -54,17 +54,17 @@ export default function Help() {
 
       <section className="nx-section nx-section--soft">
         <div className="nx-section__label">Contact support</div>
-        <h2 className="nx-section__title">Email the Nexora team</h2>
+        <h2 className="nx-section__title">Email the Nexora POS Pro team</h2>
         <p className="nx-section__lead">
           Write to{" "}
-          <a className="nx-support-link" href={supportMailto({ subject: "Nexora POS help request" })}>
+          <a className="nx-support-link" href={supportMailto({ subject: "Nexora POS Pro help request" })}>
             {SUPPORT_EMAIL}
           </a>
           {" "}with your company name, branch count, and what you need. We also accept messages through the contact form.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginTop: "1.5rem" }}>
           <a
-            href={supportMailto({ subject: "Nexora POS help request" })}
+            href={supportMailto({ subject: "Nexora POS Pro help request" })}
             className="nx-btn-primary"
             style={{ background: "#2563EB", color: "#fff" }}
           >

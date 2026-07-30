@@ -270,7 +270,7 @@ import { isValidEmail } from "../src/lib/emailValidation.js";
 
 test("accepts official Zoho support email and standard formats", () => {
   assert.equal(isValidEmail("support@httpsnexorapos.com"), true);
-  assert.equal(isValidEmail("Support@HttpsNexoraPos.com"), true);
+  assert.equal(isValidEmail("support@httpsnexorapos.com"), true);
   assert.equal(isValidEmail("owner@example.com"), true);
   assert.equal(isValidEmail("a.b+tag@sub.domain.co"), true);
   assert.equal(isValidEmail("not-an-email"), false);

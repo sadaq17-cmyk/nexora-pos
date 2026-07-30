@@ -1,4 +1,4 @@
-﻿-- Public invoice verification registry (QR landing page).
+-- Public invoice verification registry (QR landing page).
 -- Only rows stored here can be verified; fake IDs return not found.
 
 CREATE TABLE IF NOT EXISTS public.invoice_verifications (

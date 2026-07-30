@@ -21,13 +21,13 @@ export default function Contact() {
   return (
     <div>
       <Seo
-        title="Contact — Nexora POS"
-        description="Contact Nexora POS. Email support@httpsnexorapos.com or send a message about your stores, team, and requirements."
+        title="Contact — Nexora POS Pro"
+        description="Contact Nexora POS Pro. Email support@httpsnexorapos.com or send a message about your stores, team, and requirements."
       />
 
       <section className="nx-section" style={{ paddingTop: "3.5rem" }}>
         <div className="nx-section__label">Contact</div>
-        <h1 className="nx-section__title">Talk to Nexora</h1>
+        <h1 className="nx-section__title">Talk to Nexora POS Pro</h1>
         <p className="nx-section__lead">
           Prefer email? Reach us directly at{" "}
           <a className="nx-support-link" href={SUPPORT_MAILTO}>
@@ -60,7 +60,7 @@ export default function Contact() {
               Tell us about your stores, team size, and what you need. We respond to trial, billing, and onboarding questions.
             </p>
             <a
-              href={supportMailto({ subject: "Nexora POS inquiry" })}
+              href={supportMailto({ subject: "Nexora POS Pro inquiry" })}
               className="nx-btn-primary"
               style={{ marginTop: "1.5rem", display: "inline-flex" }}
             >

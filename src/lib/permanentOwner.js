@@ -5,6 +5,6 @@ export const PERMANENT_COMPANY_OWNER = Object.freeze({
   role: "owner",
   company_id: 1,
   company_code: "NEXORA001",
-  company_name: "Nexora POS Enterprise",
+  company_name: "Nexora POS Pro",
   branch_id: 1,
 });

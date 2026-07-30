@@ -60,8 +60,13 @@ record("API rate limit helpers", helpers.includes("consumeRateLimit") ? "PASS" :
 record("CSRF origin allowlist", helpers.includes("isAllowedOrigin") ? "PASS" : "FAIL", "_authHelpers.js");
 record(
   "send-email hardened",
-  sendEmail.includes("isAllowedOrigin") && sendEmail.includes("consumeRateLimit") ? "PASS" : "FAIL",
-  "origin + rate limit"
+  sendEmail.includes("isAllowedOrigin")
+    && sendEmail.includes("consumeRateLimit")
+    && sendEmail.includes("EMAIL_AUTH_REQUIRED")
+    && sendEmail.includes("hasValidInternalSecret")
+    ? "PASS"
+    : "FAIL",
+  "origin + rate limit + no open transactional relay"
 );
 
 // Sessions / MFA / uploads / email verification / audit

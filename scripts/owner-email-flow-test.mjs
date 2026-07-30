@@ -143,8 +143,10 @@ async function main() {
     assert.match(forgot, /noValidate/);
     assert.match(forgot, /support@httpsnexorapos\.com/);
     assert.match(forgot, /current login email/i);
-    // Login resolution always uses the live Supabase Auth email after confirm.
-    assert.match(resolve, /String\(user\.email \|\| ""\)\.toLowerCase\(\)/);
+    // Login resolution returns the live account email (profiles / auth), lowercased.
+    assert.match(resolve, /String\((?:data|match)\.email\)\.toLowerCase\(\)/);
+    assert.match(resolve, /from\("profiles"\)/);
+    assert.match(resolve, /GENERIC_OK/);
   });
 
   await test("local profile sync keeps auth email and company email aligned", () => {

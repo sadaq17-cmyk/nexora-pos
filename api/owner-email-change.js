@@ -17,7 +17,7 @@ import {
 } from "./_authHelpers.js";
 import { isValidEmailAddress, sendOutboundEmail, mailProviderLabel } from "./_mailTransport.js";
 
-const SITE_ORIGIN = "https://www.httpsnexorapos.com";
+const SITE_ORIGIN = "https://www.nexorapospro.com";
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 function hashToken(token) {
@@ -39,9 +39,9 @@ function siteOriginFromRequest(req) {
 function emailChangeTemplate({ name, newEmail, link }) {
   const safeName = escapeHtml(name || "there");
   const safeEmail = escapeHtml(newEmail);
-  const subject = "Confirm your new Nexora POS login email";
+  const subject = "Confirm your new Nexora POS Pro login email";
   const html = `<div style="font-family: Arial, Helvetica, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px; color: #0F172A;">
-    <p style="font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #059669; margin: 0 0 20px;">Nexora POS</p>
+    <p style="font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #059669; margin: 0 0 20px;">Nexora POS Pro</p>
     <h1 style="font-size: 20px; margin: 0 0 16px;">Confirm email change</h1>
     <p style="font-size: 14px; line-height: 22px; margin: 0 0 16px;">Hi ${safeName}, confirm that <strong>${safeEmail}</strong> should become your Company Owner login email.</p>
     <p style="text-align: center; margin: 28px 0;">

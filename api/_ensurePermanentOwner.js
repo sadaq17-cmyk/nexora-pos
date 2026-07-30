@@ -2,6 +2,7 @@ import {
   applySecurityHeaders,
   consumeRateLimit,
   createAdminClient,
+  ensureUserSynced,
   getClientIp,
   isAllowedOrigin,
   listAllAuthUsers,
@@ -69,7 +70,7 @@ const COMPANY_OWNER = {
   role: "owner",
   company_id: 1,
   company_code: "NEXORA001",
-  company_name: "Nexora POS Enterprise",
+  company_name: "Nexora POS Pro",
   branch_id: 1,
   knownId: "3220e336-22c2-4ef6-8a42-198b5059bedb",
 };
@@ -241,6 +242,37 @@ export async function ensurePermanentOwnerHandler(req, res) {
       ensurePlatformAdmin(admin, { forcePassword }),
     ]);
 
+    // Keep public.profiles in sync — sales.user_id FK references profiles(id).
+    const profileSync = { company_owner: null, platform_admin: null };
+    try {
+      profileSync.company_owner = await ensureUserSynced(admin, {
+        id: company.user_id,
+        email: company.email || COMPANY_OWNER.email,
+        name: COMPANY_OWNER.name,
+        role: COMPANY_OWNER.role,
+        company_id: COMPANY_OWNER.company_id,
+        branch_id: COMPANY_OWNER.branch_id,
+        username: COMPANY_OWNER.displayUsername,
+        active: true,
+      });
+    } catch (syncErr) {
+      console.error("[ensure-permanent-owner] company owner profile sync", syncErr);
+    }
+    try {
+      profileSync.platform_admin = await ensureUserSynced(admin, {
+        id: platform.user_id,
+        email: PLATFORM_ADMIN.email,
+        name: PLATFORM_ADMIN.name,
+        role: PLATFORM_ADMIN.role,
+        company_id: null,
+        branch_id: null,
+        username: PLATFORM_ADMIN.username,
+        active: true,
+      });
+    } catch (syncErr) {
+      console.error("[ensure-permanent-owner] platform admin profile sync", syncErr);
+    }
+
     return res.status(200).json({
       success: true,
       ensured: true,
@@ -251,6 +283,7 @@ export async function ensurePermanentOwnerHandler(req, res) {
         username: COMPANY_OWNER.displayUsername,
         company_code: COMPANY_OWNER.company_code,
         user_id: company.user_id,
+        profile_synced: Boolean(profileSync.company_owner?.publicUserId),
       },
       platform_admin: {
         created: platform.created,
@@ -259,6 +292,7 @@ export async function ensurePermanentOwnerHandler(req, res) {
         role: PLATFORM_ADMIN.role,
         user_id: platform.user_id,
         password_synced: platform.password_synced,
+        profile_synced: Boolean(profileSync.platform_admin?.publicUserId),
       },
       created: company.created,
       email: company.email || COMPANY_OWNER.email,

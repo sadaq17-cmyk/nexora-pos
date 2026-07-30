@@ -1,13 +1,15 @@
 /**
- * Final production E2E verification against https://www.httpsnexorapos.com
+ * Final production E2E verification against https://www.nexorapospro.com
  * Prefer: npx vercel env run -e production -- node scripts/final-e2e-verification.mjs
  * Never prints secret values.
  */
 import { createClient } from "@supabase/supabase-js";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertNotProduction } from "./_prodSafety.mjs";
 
-const BASE = process.env.E2E_BASE_URL || "https://www.httpsnexorapos.com";
+const BASE = process.env.E2E_BASE_URL || "https://www.nexorapospro.com";
+assertNotProduction(BASE, { scriptName: "final-e2e-verification.mjs" });
 const stamp = Date.now();
 const scorecard = [];
 

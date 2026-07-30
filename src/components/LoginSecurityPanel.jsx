@@ -9,6 +9,7 @@ import {
   Lock,
   LogOut,
   Mail,
+  MessageSquare,
   MonitorSmartphone,
   Shield,
   ShieldCheck,
@@ -22,6 +23,7 @@ import { isOwner } from "../lib/rbac";
 import { PASSWORD_HINT } from "../lib/passwordPolicy";
 import { isValidEmail } from "../lib/emailValidation";
 import { requireSupabase } from "../lib/supabaseClient";
+import OtpVerification from "./OtpVerification";
 import {
   challengeAndVerifyTotp,
   enrollTotp,
@@ -99,8 +101,13 @@ const inputClass =
   "w-full rounded-xl border border-[var(--ls-border)] bg-[var(--ls-bg)] px-3.5 py-2.5 text-sm text-[var(--ls-text)] outline-none transition duration-200 focus:border-[var(--ls-primary)] focus:ring-2 focus:ring-[var(--focus-ring)]";
 
 export default function LoginSecurityPanel() {
-  const { user, updateOwnerAccount, logout, logoutAllDevices } = useAuth();
+  const { user, updateOwnerAccount, logout, logoutAllDevices, enableSmsLoginOtp, disableSmsLoginOtp } = useAuth();
   const { showToast } = useToast();
+
+  const [smsPhone, setSmsPhone] = useState("");
+  const [smsEnrolling, setSmsEnrolling] = useState(false);
+  const [smsBusy, setSmsBusy] = useState(false);
+  const [smsMsg, setSmsMsg] = useState({ error: "", info: "" });
 
   const [email, setEmail] = useState(user?.email || "");
   const [emailPassword, setEmailPassword] = useState("");
@@ -293,6 +300,44 @@ export default function LoginSecurityPanel() {
     } finally {
       setMfaBusy(false);
     }
+  };
+
+  const startSmsEnroll = () => {
+    setSmsMsg({ error: "", info: "" });
+    if (!/^[+\d][\d\s().-]{7,}$/.test(smsPhone.trim())) {
+      setSmsMsg({ error: "Enter a valid phone number, including country code.", info: "" });
+      return;
+    }
+    setSmsEnrolling(true);
+  };
+
+  const onSmsOtpVerified = async (otpResult) => {
+    setSmsBusy(true);
+    const result = await enableSmsLoginOtp({ phone: smsPhone, ticket: otpResult?.enrollment_ticket });
+    setSmsBusy(false);
+    if (!result?.success) {
+      setSmsMsg({ error: result?.error || "Unable to enable SMS login verification.", info: "" });
+      return;
+    }
+    setSmsEnrolling(false);
+    setSmsPhone("");
+    setSmsMsg({ error: "", info: "SMS login verification is enabled." });
+    showToast("SMS login verification enabled");
+    recordSecurityActivity({ userId: user.id, email: user.email, type: "mfa_enabled", detail: "SMS login verification enabled" });
+  };
+
+  const disableSms = async () => {
+    if (!confirm("Disable SMS login verification for this account?")) return;
+    setSmsBusy(true);
+    const result = await disableSmsLoginOtp();
+    setSmsBusy(false);
+    if (!result?.success) {
+      setSmsMsg({ error: result?.error || "Unable to disable SMS login verification.", info: "" });
+      return;
+    }
+    setSmsMsg({ error: "", info: "SMS login verification disabled." });
+    showToast("SMS login verification disabled");
+    recordSecurityActivity({ userId: user.id, email: user.email, type: "mfa_disabled", detail: "SMS login verification disabled" });
   };
 
   const endSession = async (session) => {
@@ -581,6 +626,57 @@ export default function LoginSecurityPanel() {
               ) : null}
             </div>
           )}
+        </SecCard>
+
+        <SecCard
+          title="SMS login verification"
+          subtitle="Optional: require a 6-digit SMS code (via Africa's Talking) after your password, with automatic email fallback."
+          icon={MessageSquare}
+          delay={140}
+        >
+          <div className="space-y-3">
+            <div className={`flex items-center justify-between rounded-2xl border px-4 py-3 ${toneClasses(user?.sms_login_otp_enabled ? "success" : "warning")}`}>
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <MessageSquare size={16} />
+                {user?.sms_login_otp_enabled ? `Enabled for ${user.otp_phone || "your phone"}` : "Not enabled"}
+              </div>
+              <span className="text-xs font-medium opacity-80">{user?.sms_login_otp_enabled ? "Protected" : "Optional"}</span>
+            </div>
+
+            {smsMsg.error ? <p className="text-sm text-[#DC2626]">{smsMsg.error}</p> : null}
+            {smsMsg.info ? <p className="rounded-xl border border-[#16A34A]/20 bg-[#16A34A]/10 px-3 py-2 text-sm text-[#15803D]">{smsMsg.info}</p> : null}
+
+            {user?.sms_login_otp_enabled ? (
+              <button type="button" disabled={smsBusy} onClick={disableSms} className="login-sec-btn-danger">
+                Disable
+              </button>
+            ) : !smsEnrolling ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="tel"
+                  value={smsPhone}
+                  onChange={(e) => setSmsPhone(e.target.value)}
+                  placeholder="+2547XXXXXXXX"
+                  className={inputClass}
+                  style={{ maxWidth: 220 }}
+                />
+                <button type="button" disabled={smsBusy} onClick={startSmsEnroll} className="login-sec-btn-primary">
+                  {smsBusy ? <Loader2 size={15} className="animate-spin" /> : <MessageSquare size={15} />}
+                  Verify &amp; enable
+                </button>
+              </div>
+            ) : (
+              <OtpVerification
+                purpose="login"
+                channel="sms"
+                phone={smsPhone}
+                title="Verify your phone"
+                description="Enter the 6-digit code to confirm this number."
+                onVerified={onSmsOtpVerified}
+                onCancel={() => setSmsEnrolling(false)}
+              />
+            )}
+          </div>
         </SecCard>
 
         <SecCard

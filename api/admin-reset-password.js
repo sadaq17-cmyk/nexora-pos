@@ -11,27 +11,31 @@ import {
   isPlatformOwner,
   normalizeRole,
   sameCompany,
+  escapeHtml,
 } from "./_authHelpers.js";
+import { sendOutboundEmail } from "./_mailTransport.js";
 
-async function notifyPasswordChanged(req, { to, name }) {
+async function notifyPasswordChanged({ to, name }) {
   try {
-    const proto = req.headers["x-forwarded-proto"] || "https";
-    const host = req.headers["x-forwarded-host"] || req.headers.host;
-    const origin = host ? `${proto}://${host}` : "https://www.httpsnexorapos.com";
-    fetch(`${origin}/api/send-email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "password_changed", to, name }),
-    }).then(async (response) => {
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        console.error("[admin-reset-password] password_changed email failed:", response.status, text);
-      }
-    }).catch((err) => {
-      console.error("[admin-reset-password] password_changed email error:", err);
+    const safeName = escapeHtml(name || "there");
+    const support = "support@httpsnexorapos.com";
+    await sendOutboundEmail({
+      to,
+      subject: "Your Nexora POS Pro password was changed",
+      html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;color:#0B1C3D">
+        <p style="font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#2563EB;margin:0 0 20px">Nexora POS Pro</p>
+        <h1 style="font-size:20px;margin:0 0 16px">Hi ${safeName},</h1>
+        <p style="font-size:14px;line-height:22px;margin:0 0 16px">Your Nexora POS Pro password was just changed by an administrator.</p>
+        <p style="font-size:14px;line-height:22px;margin:0;font-weight:600">If you did not expect this, contact ${support} immediately.</p>
+      </div>`,
+      text: [
+        `Hi ${name || "there"},`,
+        "Your Nexora POS Pro password was just changed by an administrator.",
+        `If you did not expect this, contact ${support} immediately.`,
+      ].join("\n"),
     });
   } catch (err) {
-    console.error("[admin-reset-password] notify setup failed:", err);
+    console.error("[admin-reset-password] password_changed email error:", err?.message || err);
   }
 }
 
@@ -100,7 +104,7 @@ export default async function handler(req, res) {
       return jsonError(res, 502, updateError.message || "Unable to reset password.");
     }
 
-    notifyPasswordChanged(req, {
+    void notifyPasswordChanged({
       to: target.email,
       name: targetMeta.name || target.user_metadata?.name || "",
     });

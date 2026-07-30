@@ -1,6 +1,6 @@
 /**
  * Standard email format validation only.
- * Accepts real domains including httpsnexorapos.com (support@httpsnexorapos.com).
+ * Accepts real domains including nexorapospro.com (support@httpsnexorapos.com).
  */
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

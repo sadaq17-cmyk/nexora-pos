@@ -142,15 +142,15 @@ export const TESTIMONIALS = [];
 
 export const FAQ_ITEMS = [
   {
-    q: "What is Nexora POS?",
-    a: "Nexora POS is a cloud SaaS platform for running retail and specialty store operations — checkout, inventory, purchasing, teams, reporting, and subscription billing.",
+    q: "What is Nexora POS Pro?",
+    a: "Nexora POS Pro is a cloud SaaS platform for running retail and specialty store operations — checkout, inventory, purchasing, teams, reporting, and subscription billing.",
   },
   {
     q: "Which businesses can use it?",
     a: "Retail shops, supermarkets, restaurants, pharmacies, hardware, and electronics businesses — including multi-branch and multi-company setups.",
   },
   {
-    q: "Does Nexora support barcodes and receipts?",
+    q: "Does Nexora POS Pro support barcodes and receipts?",
     a: "Yes. Scan and print barcodes, manage product codes, and print thermal-ready receipts from the POS workflow.",
   },
   {

@@ -1,12 +1,12 @@
 /**
- * Nexora POS public site media & marketing configuration (MEDIA-GUIDE).
+ * Nexora POS Pro public site media & marketing configuration (MEDIA-GUIDE).
  * Industry / In Action photos live under /public/media (royalty-free Unsplash & Pexels).
- * Product Screenshots & Feature Spotlights use Nexora POS UI mockups only (no stock UI).
+ * Product Screenshots & Feature Spotlights use Nexora POS Pro UI mockups only (no stock UI).
  */
 
 export const siteConfig = {
   brand: {
-    name: "Nexora POS",
+    name: "Nexora POS Pro",
     supportEmail: "support@httpsnexorapos.com",
     colors: {
       navy: "#0B1C3D",
@@ -19,7 +19,7 @@ export const siteConfig = {
 
   media: {
     credit:
-      "Industry and In Action photography: Unsplash & Pexels (royalty-free, commercial-safe). Product UI: Nexora POS.",
+      "Industry and In Action photography: Unsplash & Pexels (royalty-free, commercial-safe). Product UI: Nexora POS Pro.",
 
     industries: [
       {
@@ -140,7 +140,7 @@ export const siteConfig = {
      */
     testimonials: [] as { quote: string; name: string; role: string; company?: string }[],
 
-    /** Nexora POS UI only — rendered via ProductMockups, not stock screenshots. */
+    /** Nexora POS Pro UI only — rendered via ProductMockups, not stock screenshots. */
     featureSpotlights: [
       { mockup: "POS Checkout", title: "POS Checkout", blurb: "Fast barcode checkout with cash tendering and receipts." },
       { mockup: "Inventory", title: "Inventory", blurb: "Stock levels, adjustments, and warehouse visibility." },
