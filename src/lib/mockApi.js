@@ -14,15 +14,15 @@ import {
   isUserManagerRole,
   normalizeRole,
   slugifyRoleId,
-} from "./rbac";
+} from "./rbac.js";
 import {
   APPROVAL_REQUEST_TYPES,
   canDecideApproval,
   canSubmitApproval,
   initialApprovalStatus,
   isValidApprovalType,
-} from "./approvalWorkflow";
-import { applyPermissionMiddleware } from "./permissionMiddleware";
+} from "./approvalWorkflow.js";
+import { applyPermissionMiddleware } from "./permissionMiddleware.js";
 import {
   CURRENCIES,
   convertToBase,
@@ -30,7 +30,7 @@ import {
   getCurrency,
   isSupportedCurrency,
   normalizeCurrencyCode,
-} from "./currency";
+} from "./currency.js";
 import {
   applyStockDelta,
   computeInventoryStats,
@@ -38,13 +38,14 @@ import {
   enrichProduct,
   getExpiringLots,
   getLowStockProducts,
+  resolveMainWarehouseIdMock,
   seedBrands,
   seedUnits,
   seedWarehouses,
   seedStockMovements,
   buildWarehouseStock,
-} from "./inventoryHelpers";
-import { buildReportAnalytics } from "./reportAnalytics";
+} from "./inventoryHelpers.js";
+import { buildReportAnalytics } from "./reportAnalytics.js";
 import bcrypt from "bcryptjs";
 import {
   CANONICAL_PLANS,
@@ -56,11 +57,11 @@ import {
   normalizePlanCode,
   PAID_PLAN_CODES,
   safePublicPlan,
-} from "./subscriptionPlans";
-import { authFetch } from "./authApi";
-import { isValidEmail as validEmail } from "./emailValidation";
-import { validateSalePayment } from "./paymentMethods";
-import { deriveInvoiceStatus, formatReceiptNumber, resolveReceiptNumber } from "./receiptCodes";
+} from "./subscriptionPlans.js";
+import { authFetch } from "./authApi.js";
+import { isValidEmail as validEmail } from "./emailValidation.js";
+import { validateSalePayment } from "./paymentMethods.js";
+import { deriveInvoiceStatus, formatReceiptNumber, resolveReceiptNumber } from "./receiptCodes.js";
 
 const STORAGE_KEY = "nexora_pos_web_db_v3";
 const LEGACY_STORAGE_KEY = "nexora_pos_web_db_v2";
@@ -72,9 +73,10 @@ const DEMO_USERS = [
   { id: 5, name: "Grace Achieng", username: "sales", email: "sales@nexora.demo", password: "NexoraDemo123!", pin: "6666", role: "sales_manager", active: 1, branch_id: 2 },
   { id: 6, name: "Sadiq", username: "sadik", email: "sadik@nexora.demo", password: "NexoraDemo123!", pin: "2222", role: "cashier", active: 1, branch_id: 1 },
   { id: 7, name: "David Kamau", username: "accountant", email: "accountant@nexora.demo", password: "NexoraDemo123!", pin: "7777", role: "accountant", active: 1, branch_id: 1 },
-  { id: 8, name: "Platform Super Admin", username: "SuperAdmin", email: "saadaq17@icloud.com", password: "Honest@26", pin: "0001", role: "platform_owner", active: 1, branch_id: null, company_id: null },
-  { id: 9, name: "Nexora Company Owner", username: "companyowner", email: "companyowner@nexora.demo", password: "CompanyOwner123!", pin: "0002", role: "owner", active: 1, branch_id: 1, company_id: 1 },
-  { id: 10, name: "Honest Company Owner", username: "Owner@Honest", email: "support@httpsnexorapos.com", password: "Honest@2026", pin: "8888", role: "owner", active: 1, branch_id: 1, company_id: 1 },
+  // DEV-only mock credentials — never reuse production passwords here.
+  { id: 8, name: "Platform Super Admin", username: "SuperAdmin", email: "platform.owner@nexora.demo", password: "DemoOnly!ChangeMe1", pin: "0001", role: "platform_owner", active: 1, branch_id: null, company_id: null },
+  { id: 9, name: "Nexora Company Owner", username: "companyowner", email: "companyowner@nexora.demo", password: "DemoOnly!ChangeMe2", pin: "0002", role: "owner", active: 1, branch_id: 1, company_id: 1 },
+  { id: 10, name: "Honest Company Owner", username: "Owner@Honest", email: "owner.demo@nexora.demo", password: "DemoOnly!ChangeMe3", pin: "8888", role: "owner", active: 1, branch_id: 1, company_id: 1 },
 ];
 
 const wait = (value) => new Promise((resolve) => setTimeout(() => resolve(value), 80));
@@ -276,7 +278,7 @@ function seedDatabase() {
 ];
 
   const settings = {
-    store_name: "Nexora POS Enterprise",
+    store_name: "Nexora POS Pro",
     store_phone: "+254 700 555 123",
     store_address: "Waiyaki Way, Nairobi",
     currency: "KES",
@@ -289,7 +291,7 @@ function seedDatabase() {
     payment_mobile: "true",
     payment_split: "true",
     firebase_sync_enabled: "false",
-    receipt_header: "Thank you for shopping with Nexora POS Enterprise!",
+    receipt_header: "Thank you for shopping with Nexora POS Pro!",
   receipt_footer: "Goods sold in good condition are exchangeable within 7 days with receipt.",
     barcode_prefix: "89",
     barcode_format: "EAN-13",
@@ -308,7 +310,7 @@ function seedDatabase() {
   return {
     companies: [{
       id: 1,
-      name: "Nexora POS Enterprise",
+      name: "Nexora POS Pro",
       business_type: "Retail",
       country: "Kenya",
       currency: "KES",
@@ -340,6 +342,7 @@ function seedDatabase() {
     purchases,
     purchaseReturns: [],
     purchasePayments: [],
+    supplierLedgerAdjustments: [],
     sales,
     heldSales: [],
     stockTransfers: [],
@@ -399,6 +402,10 @@ function seedDatabase() {
     warehouses,
     warehouseStock,
     stockMovements,
+    productVariantSkus: [],
+    productSerials: [],
+    stockLots: [],
+    stockLotAllocations: [],
     invoiceVerifications: [],
     nextIds: {
       user: 10,
@@ -408,6 +415,11 @@ function seedDatabase() {
       warehouse: 3,
       stockMovement: 4,
       variant: 4,
+      variantSku: 1,
+      productSerial: 1,
+      stockLot: 1,
+      stockLotAllocation: 1,
+      stockCount: 1,
       customRole: 1,
       category: 5,
       branch: 3,
@@ -448,8 +460,8 @@ function buildInvoiceVerificationPayload(sale) {
   return {
     receipt_no: receiptNo,
     invoice_id: String(sale.id || receiptNo),
-    company: company?.name || db.settings?.store_name || "Nexora POS Enterprise",
-    company_name: company?.name || db.settings?.store_name || "Nexora POS Enterprise",
+    company: company?.name || db.settings?.store_name || "Nexora POS Pro",
+    company_name: company?.name || db.settings?.store_name || "Nexora POS Pro",
     branch: sale.branch_name || "",
     branch_name: sale.branch_name || "",
     customer: customer || sale.customer || "Walk-in",
@@ -676,8 +688,9 @@ function hydrateDb(data) {
   }));
   const tenantCollections = [
     "categories", "products", "customers", "customerPayments", "suppliers", "supplierPayments",
-    "purchases", "purchaseReturns", "sales", "heldSales", "stockTransfers", "expenseCategories",
+    "purchases", "purchaseReturns", "purchasePayments", "supplierLedgerAdjustments", "sales", "heldSales", "stockTransfers", "expenseCategories",
     "expenses", "brands", "units", "warehouses", "warehouseStock", "stockMovements",
+    "productVariantSkus", "productSerials", "stockLots", "stockLotAllocations",
   ];
   for (const collection of tenantCollections) {
     dbData[collection] = (dbData[collection] || []).map((record) => ({
@@ -1041,6 +1054,76 @@ function logAudit(action, module, details) {
   persist();
 }
 
+// Mirrors api/_posData.js's recomputeSupplierBalance(): derive a supplier's
+// outstanding balance, total ordered/paid, and order count directly from every
+// purchase invoice (Draft/Cancelled/Rejected excluded), payment, return, and
+// ledger adjustment on file — so the demo/offline data never drifts from the
+// same enterprise AP rules used against the real backend.
+function recomputeSupplierBalanceMock(supplierId) {
+  const id = Number(supplierId);
+  if (!id) return null;
+  const supplier = db.suppliers.find((s) => s.id === id);
+  if (!supplier) return null;
+
+  // Only Approved / Received purchases book AP (Pending/Draft do not).
+  const purchases = db.purchases.filter(
+    (p) =>
+      Number(p.supplier_id) === id
+      && ["Approved", "Ordered", "Received", "PartiallyReceived"].includes(p.status)
+  );
+  const supplierPayments = (db.supplierPayments || []).filter((p) => Number(p.supplier_id) === id);
+  const purchasePayments = (db.purchasePayments || []).filter((p) => Number(p.supplier_id) === id);
+  const returns = (db.purchaseReturns || []).filter((r) => {
+    if (Number(r.supplier_id) === id) return true;
+    const purchase = db.purchases.find((p) => p.id === Number(r.purchase_id));
+    return purchase && Number(purchase.supplier_id) === id;
+  });
+  const adjustments = (db.supplierLedgerAdjustments || []).filter((a) => Number(a.supplier_id) === id);
+
+  const purchaseTotal = purchases.reduce((sum, p) => sum + (Number(p.total) || 0), 0);
+  const paidTotal =
+    supplierPayments.reduce((sum, p) => sum + (Number(p.base_amount ?? p.amount) || 0), 0) +
+    purchasePayments.reduce((sum, p) => sum + (Number(p.base_amount ?? p.amount) || 0), 0);
+  const returnsCredit = returns.reduce((sum, r) => sum + (Number(r.qty) || 0) * (Number(r.cost) || 0), 0);
+  const creditNotes = adjustments
+    .filter((a) => a.entry_type === "credit_note")
+    .reduce((sum, a) => sum + (Number(a.credit) || 0), 0);
+  const adjustmentsNet = adjustments
+    .filter((a) => a.entry_type === "adjustment" || a.entry_type === "debit_note")
+    .reduce((sum, a) => sum + (Number(a.debit) || 0) - (Number(a.credit) || 0), 0);
+
+  const openingDebit = Number(supplier.opening_debit != null ? supplier.opening_debit : supplier.opening_balance) || 0;
+  const openingCredit = Number(supplier.opening_credit) || 0;
+  // Opening Debit + Purchases - Payments - Credit Notes (- Opening Credit)
+  const balance = openingDebit - openingCredit + purchaseTotal - paidTotal - returnsCredit - creditNotes + adjustmentsNet;
+
+  db.suppliers = db.suppliers.map((s) =>
+    s.id === id
+      ? {
+          ...s,
+          balance,
+          opening_debit: openingDebit,
+          opening_credit: openingCredit,
+          opening_balance: openingDebit - openingCredit,
+          total_ordered: purchaseTotal,
+          total_paid: paidTotal,
+          total_purchases: purchaseTotal,
+          total_payments: paidTotal,
+          outstanding_balance: balance,
+          current_balance: balance,
+          order_count: purchases.length,
+        }
+      : s
+  );
+  return {
+    balance,
+    total_ordered: purchaseTotal,
+    total_paid: paidTotal,
+    order_count: purchases.length,
+    outstanding_balance: balance,
+  };
+}
+
 function userMetrics(user) {
   const sales = db.sales.filter((sale) => Number(sale.user_id) === Number(user.id));
   const sessions = db.sessions.filter((session) => Number(session.user_id) === Number(user.id));
@@ -1090,6 +1173,10 @@ function normalizeProduct(product) {
   const unitRow = db.units?.find((u) => u.id === Number(enriched.unit_id));
   const branch = db.branches.find((b) => b.id === Number(enriched.branch_id))?.name || null;
   const primaryWh = db.warehouses?.find((w) => w.branch_id === Number(enriched.branch_id)) || db.warehouses?.[0];
+  const cost = Number(enriched.cost) || 0;
+  const price = Number(enriched.price) || 0;
+  const avgCost = enriched.avg_cost != null ? Number(enriched.avg_cost) : null;
+  const stock = Number(enriched.stock) || 0;
   return {
     ...enriched,
     category_id: enriched.category_id ? Number(enriched.category_id) : null,
@@ -1103,6 +1190,13 @@ function normalizeProduct(product) {
     sku: enriched.sku || (Array.isArray(enriched.variants) ? enriched.variants.find((v) => v?.sku)?.sku : "") || "",
     image_url: enriched.image_url || "",
     variants: Array.isArray(enriched.variants) ? enriched.variants : [],
+    cost,
+    price,
+    wholesale_price: Number(enriched.wholesale_price) || 0,
+    min_selling_price: Number(enriched.min_selling_price) || 0,
+    // Enterprise costing: value stock at average cost when known, never at selling price.
+    stock_value: stock * (avgCost != null ? avgCost : cost),
+    profit_margin: price > 0 ? ((price - cost) / price) * 100 : 0,
   };
 }
 
@@ -1270,9 +1364,10 @@ function buildUserSales(filters = {}) {
 
 const TENANT_COLLECTIONS = [
   "users", "branches", "categories", "products", "customers", "customerPayments",
-  "suppliers", "supplierPayments", "purchases", "purchaseReturns", "sales", "heldSales",
+  "suppliers", "supplierPayments", "purchases", "purchaseReturns", "purchasePayments", "supplierLedgerAdjustments", "sales", "heldSales",
   "stockTransfers", "expenseCategories", "expenses", "brands", "units", "warehouses",
-  "warehouseStock", "stockMovements", "auditLog", "roles", "subscriptions",
+  "warehouseStock", "stockMovements", "productVariantSkus", "productSerials", "stockLots",
+  "stockLotAllocations", "auditLog", "roles", "subscriptions",
   "companyDomains", "billingRecords",
 ];
 
@@ -1508,8 +1603,14 @@ const rawApi = {
       const companyCode = nextCompanyCode(companyName);
       const trialDays = Math.max(1, Number(plan.trial_days || DEFAULT_TRIAL_DAYS));
       const company = {
-        id: companyId, name: companyName, business_type: "Retail", country: "Kenya", code: companyCode,
-        currency: BILLING_CURRENCY, time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Africa/Nairobi",
+        id: companyId, name: companyName, business_type: "Retail",
+        country: String(payload.country || "Kenya"),
+        country_code: String(payload.country_code || "KE"),
+        code: companyCode,
+        currency: String(payload.currency_code || payload.currency || BILLING_CURRENCY).toUpperCase(),
+        currency_symbol: String(payload.currency_symbol || getCurrency(payload.currency_code || payload.currency || BILLING_CURRENCY).symbol),
+        locale: String(payload.locale || getCurrency(payload.currency_code || payload.currency || BILLING_CURRENCY).locale || "en-KE"),
+        time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Africa/Nairobi",
         email, phone, address: "", logo: "", status: "pending_verification",
         owner_user_id: supabaseUserId, signup_source: "public", created_at: timestamp, created_by: null,
         plan_code: plan.code,
@@ -1539,8 +1640,15 @@ const rawApi = {
       db.permissionMatrices[companyId] = structuredClone(defaultPermissions());
       db.companySettings[companyId] = {
         ...seedDatabase().settings, store_name: companyName, store_phone: phone,
-        currency: BILLING_CURRENCY, currency_symbol: "KSh", default_branch_id: String(branchId),
-        base_currency_code: BILLING_CURRENCY, report_currency: BILLING_CURRENCY,
+        currency: company.currency,
+        currency_code: company.currency,
+        currency_symbol: company.currency_symbol,
+        locale: company.locale,
+        country: company.country,
+        country_code: company.country_code,
+        default_branch_id: String(branchId),
+        base_currency_code: company.currency,
+        report_currency: company.currency,
       };
       logAudit("public_company_signup", "public_auth", { company_id: companyId, user_id: supabaseUserId, plan_code: plan.code });
       persist();
@@ -1552,6 +1660,11 @@ const rawApi = {
         email,
         username,
         currency: company.currency,
+        currency_code: company.currency,
+        currency_symbol: company.currency_symbol,
+        locale: company.locale,
+        country: company.country,
+        country_code: company.country_code,
         plan_code: plan.code,
         trial_ends_at: subscription.trial_ends_at,
       });
@@ -1953,6 +2066,14 @@ const rawApi = {
     getByBarcode: (barcode) => wait(db.products.map(normalizeProduct).find((product) => product.barcode === barcode && !product.deleted_at) || null),
     getCategories: () => wait(db.categories),
     create: (product) => {
+      // Enterprise pricing rule: every product must carry both a Cost Price (used by
+      // Purchases) and a Selling Price (used by Sales/POS) — never mixed or optional.
+      if (product.cost === undefined || product.cost === null || product.cost === "" || Number(product.cost) < 0) {
+        return wait({ success: false, error: "Cost Price is required and cannot be negative." });
+      }
+      if (product.price === undefined || product.price === null || product.price === "" || Number(product.price) <= 0) {
+        return wait({ success: false, error: "Selling Price is required and must be greater than zero." });
+      }
       const companyId = currentMockUser?.company_id;
       const productCount = db.products.filter((row) => Number(row.company_id || companyId) === Number(companyId)).length;
       const limited = enforceCompanyPlanLimit("products", productCount, companyId);
@@ -1988,6 +2109,7 @@ const rawApi = {
         barcode,
         tax_rate: Number(product.tax_rate ?? product.tax) || 0,
         wholesale_price: Number(product.wholesale_price) || 0,
+        min_selling_price: Number(product.min_selling_price) || 0,
         discount_percent: Number(product.discount_percent) || 0,
         tax_inclusive: !!product.tax_inclusive,
         max_stock: Number(product.max_stock) || 0,
@@ -2020,6 +2142,12 @@ const rawApi = {
       return wait({ success: true, id: record.id, product: record });
     },
     update: (product) => {
+      if (product.cost !== undefined && (product.cost === null || product.cost === "" || Number(product.cost) < 0)) {
+        return wait({ success: false, error: "Cost Price is required and cannot be negative." });
+      }
+      if (product.price !== undefined && (product.price === null || product.price === "" || Number(product.price) <= 0)) {
+        return wait({ success: false, error: "Selling Price is required and must be greater than zero." });
+      }
       db.products = db.products.map((item) => {
         if (item.id !== product.id) return item;
         const variants = Array.isArray(product.variants)
@@ -2227,6 +2355,7 @@ const rawApi = {
               branch_id: payload.branch_id !== undefined ? Number(payload.branch_id) : wh.branch_id,
               address: payload.address !== undefined ? payload.address : wh.address,
               active: payload.active !== undefined ? !!payload.active : wh.active,
+              // Main Store designation only ever changes via warehouses.setMain.
             }
           : wh
       );
@@ -2234,7 +2363,23 @@ const rawApi = {
       persist();
       return wait({ success: true });
     },
+    setMain: (id) => {
+      if (!isOwner(currentMockUser?.role) && !isSuperAdmin(currentMockUser?.role) && normalizeRole(currentMockUser?.role) !== "admin") {
+        return wait({ success: false, error: "Only Owner/Admin can change the Main Store warehouse.", code: "FORBIDDEN" });
+      }
+      const warehouse = (db.warehouses || []).find((wh) => wh.id === Number(id));
+      if (!warehouse) return wait({ success: false, error: "Warehouse not found." });
+      if (warehouse.is_main) return wait({ success: true, warehouse });
+      db.warehouses = (db.warehouses || []).map((wh) => ({ ...wh, is_main: wh.id === Number(id) }));
+      logAudit("set_main_warehouse", "inventory", { id: Number(id), name: warehouse.name });
+      persist();
+      return wait({ success: true, warehouse: { ...warehouse, is_main: true } });
+    },
     delete: (id) => {
+      const target = (db.warehouses || []).find((wh) => wh.id === id);
+      if (target?.is_main) {
+        return wait({ success: false, error: "Cannot delete the Main Store warehouse. Set another warehouse as Main Store first." });
+      }
       const hasStock = (db.warehouseStock || []).some((row) => row.warehouse_id === id && Number(row.qty) > 0);
       if (hasStock) return wait({ success: false, error: "Warehouse still has stock. Transfer or clear first." });
       db.warehouses = (db.warehouses || []).filter((wh) => wh.id !== id);
@@ -2580,11 +2725,31 @@ const rawApi = {
       const includeDeleted = params.include_deleted === true;
       const includeArchived = params.include_archived !== false;
       return wait(
-        db.suppliers.filter((s) => {
-          if (!includeDeleted && s.deleted_at) return false;
-          if (!includeArchived && (s.archived_at || s.status === "Archived")) return false;
-          return true;
-        })
+        db.suppliers
+          .filter((s) => {
+            if (!includeDeleted && s.deleted_at) return false;
+            if (!includeArchived && (s.archived_at || s.status === "Archived")) return false;
+            return true;
+          })
+          .map((s) => {
+            const openingDebit = Number(s.opening_debit != null ? s.opening_debit : s.opening_balance) || 0;
+            const openingCredit = Number(s.opening_credit) || 0;
+            const balance = Number(s.balance) || 0;
+            const totalPurchases = Number(s.total_purchases ?? s.total_ordered) || 0;
+            const totalPayments = Number(s.total_payments ?? s.total_paid) || 0;
+            return {
+              ...s,
+              opening_debit: openingDebit,
+              opening_credit: openingCredit,
+              opening_balance: openingDebit - openingCredit,
+              current_balance: balance,
+              total_purchases: totalPurchases,
+              total_payments: totalPayments,
+              outstanding_balance: balance,
+              total_ordered: totalPurchases,
+              total_paid: totalPayments,
+            };
+          })
       );
     },
     getDashboard: () => {
@@ -2683,7 +2848,11 @@ const rawApi = {
         const n = Number(String(s.code || "").replace(/\D/g, "")) || 0;
         return Math.max(m, n);
       }, 0);
-      const opening = Number(supplier.opening_balance) || 0;
+      const openingDebit = Number(
+        supplier.opening_debit != null ? supplier.opening_debit : supplier.opening_balance
+      ) || 0;
+      const openingCredit = Number(supplier.opening_credit) || 0;
+      const opening = openingDebit - openingCredit;
       const record = {
         ...supplier,
         id: nextId("supplier"),
@@ -2691,6 +2860,8 @@ const rawApi = {
         order_count: 0,
         total_ordered: 0,
         total_paid: 0,
+        opening_debit: openingDebit,
+        opening_credit: openingCredit,
         opening_balance: opening,
         balance: supplier.balance != null ? Number(supplier.balance) : opening,
         credit_limit: Number(supplier.credit_limit) || 0,
@@ -2715,6 +2886,7 @@ const rawApi = {
     },
     update: (supplier) => {
       db.suppliers = db.suppliers.map((item) => (item.id === supplier.id ? { ...item, ...supplier } : item));
+      if (supplier.opening_balance !== undefined) recomputeSupplierBalanceMock(supplier.id);
       const updated = db.suppliers.find((s) => s.id === supplier.id);
       logAudit("update_supplier", "suppliers", { id: supplier.id, name: updated?.name });
       persist();
@@ -2787,15 +2959,9 @@ const rawApi = {
         recorded.push(row);
       }
       if (!recorded.length) return wait({ success: false, error: "Payment amount must be positive." });
+      const meta = recomputeSupplierBalanceMock(payload.supplier_id);
       db.suppliers = db.suppliers.map((supplier) =>
-        supplier.id === Number(payload.supplier_id)
-          ? {
-              ...supplier,
-              balance: Math.max(0, Number(supplier.balance) - totalBase),
-              total_paid: Number(supplier.total_paid || 0) + totalBase,
-              last_payment_at: nowIso(),
-            }
-          : supplier
+        supplier.id === Number(payload.supplier_id) ? { ...supplier, last_payment_at: nowIso() } : supplier
       );
       logAudit("supplier_payment", "suppliers", {
         supplier_id: payload.supplier_id,
@@ -2803,37 +2969,147 @@ const rawApi = {
         splits: recorded.map((p) => ({ id: p.id, amount: p.amount, method: p.method })),
       });
       persist();
-      return wait({ success: true, payments: recorded, payment: recorded[0] });
+      return wait({ success: true, balance: meta?.balance, payments: recorded, payment: recorded[0] });
     },
-    getStatement: (id) => {
+    getStatement: (idOrParams) => {
+      const params = typeof idOrParams === "object" && idOrParams !== null ? idOrParams : { id: idOrParams };
+      const id = Number(params.id);
       const supplier = db.suppliers.find((s) => s.id === id);
       const purchases = db.purchases.filter((p) => Number(p.supplier_id) === id);
       const payments = db.supplierPayments.filter((p) => Number(p.supplier_id) === id);
-      const ledger = [
+      const returns = (db.purchaseReturns || []).filter((r) => {
+        if (Number(r.supplier_id) === id) return true;
+        const purchase = db.purchases.find((p) => p.id === Number(r.purchase_id));
+        return purchase && Number(purchase.supplier_id) === id;
+      });
+      const purchasePayments = (db.purchasePayments || []).filter((p) => Number(p.supplier_id) === id);
+      const adjustments = (db.supplierLedgerAdjustments || []).filter((a) => Number(a.supplier_id) === id);
+
+      let allEntries = [
         ...purchases
-          .filter((p) => !["Cancelled", "Draft"].includes(p.status))
+          .filter((p) => ["Approved", "Ordered", "Received", "PartiallyReceived"].includes(p.status))
           .map((p) => ({
-            entry_date: p.created_at,
+            entry_date: p.approved_at || p.ordered_at || p.created_at,
             entry_type: "purchase",
-            reference: p.po_number,
-            description: `Purchase ${p.po_number} (${p.status})`,
+            reference: p.po_number || p.invoice_no,
+            description: `Purchase ${p.po_number || p.id} (${p.status})`,
             debit: Number(p.total) || 0,
             credit: 0,
+            branch_id: p.branch_id ?? null,
+            source_table: "purchases",
+            source_id: p.id,
           })),
         ...payments.map((p) => ({
           entry_date: p.created_at,
-          entry_type: "supplier_payment",
-          reference: p.method,
-          description: `Payment via ${p.method}`,
+          entry_type: "payment",
+          reference: p.reference || p.method,
+          description: `Payment via ${p.method || "Cash"}`,
           debit: 0,
           credit: Number(p.amount) || 0,
+          branch_id: p.branch_id ?? null,
+          source_table: "supplier_payments",
+          source_id: p.id,
         })),
-      ].sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)));
+        ...purchasePayments.map((p) => ({
+          entry_date: p.created_at,
+          entry_type: "payment",
+          reference: p.reference || p.method,
+          description: `PO payment via ${p.method || "Cash"}`,
+          debit: 0,
+          credit: Number(p.amount) || 0,
+          branch_id: p.branch_id ?? null,
+          source_table: "purchase_payments",
+          source_id: p.id,
+        })),
+        ...returns.map((r) => {
+          const purchase = db.purchases.find((p) => p.id === Number(r.purchase_id));
+          return {
+            entry_date: r.created_at,
+            entry_type: "purchase_return",
+            reference: purchase?.po_number || purchase?.invoice_no || `#${r.purchase_id}`,
+            description: `Purchase return${r.reason ? ` — ${r.reason}` : ""}`,
+            debit: 0,
+            credit: (Number(r.qty) || 0) * (Number(r.cost) || 0),
+            branch_id: r.branch_id ?? purchase?.branch_id ?? null,
+            source_table: "purchase_returns",
+            source_id: r.id,
+          };
+        }),
+        ...adjustments.map((a) => ({
+          entry_date: a.entry_date || a.created_at,
+          entry_type: a.entry_type,
+          reference: a.reference,
+          description: a.description,
+          debit: Number(a.debit) || 0,
+          credit: Number(a.credit) || 0,
+          branch_id: a.branch_id ?? null,
+          source_table: "supplier_ledger_adjustments",
+          source_id: a.id,
+        })),
+      ].sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)));
+
+      const branchFilter = params.branch_id != null && params.branch_id !== "" ? Number(params.branch_id) : null;
+      if (branchFilter) allEntries = allEntries.filter((e) => Number(e.branch_id) === branchFilter);
+
+      const startDate = params.start_date ? String(params.start_date).slice(0, 10) : null;
+      const endDate = params.end_date ? String(params.end_date).slice(0, 10) : null;
+      const dayKey = (value) => String(value || "").slice(0, 10);
+
+      const openingDebit = Number(
+        supplier?.opening_debit != null ? supplier.opening_debit : supplier?.opening_balance
+      ) || 0;
+      const openingCredit = Number(supplier?.opening_credit) || 0;
+      let running = openingDebit - openingCredit;
+      let openingBalanceForRange = running;
+      const withRunning = [];
+      for (const entry of allEntries) {
+        const entryDay = dayKey(entry.entry_date);
+        const beforeRange = startDate && entryDay < startDate;
+        running += Number(entry.debit) - Number(entry.credit);
+        if (beforeRange) {
+          openingBalanceForRange = running;
+          continue;
+        }
+        if (endDate && entryDay > endDate) continue;
+        withRunning.push({ ...entry, running_balance: running });
+      }
+
+      const inRange = (entry) => {
+        const entryDay = dayKey(entry.entry_date);
+        if (startDate && entryDay < startDate) return false;
+        if (endDate && entryDay > endDate) return false;
+        return true;
+      };
+      const totals = allEntries.filter(inRange).reduce(
+        (acc, e) => {
+          const type = String(e.entry_type || "");
+          if (type === "purchase") acc.total_purchases += Number(e.debit) || 0;
+          else if (type === "payment") acc.total_payments += Number(e.credit) || 0;
+          else if (type === "purchase_return") acc.total_returns += Number(e.credit) || 0;
+          else if (type === "debit_note") acc.total_debit_notes += Number(e.debit) || 0;
+          else if (type === "credit_note") acc.total_credit_notes += Number(e.credit) || 0;
+          else if (type === "adjustment") acc.total_adjustments += (Number(e.debit) || 0) - (Number(e.credit) || 0);
+          return acc;
+        },
+        { total_purchases: 0, total_payments: 0, total_returns: 0, total_debit_notes: 0, total_credit_notes: 0, total_adjustments: 0 }
+      );
+      const closingBalance = withRunning.length ? withRunning[withRunning.length - 1].running_balance : openingBalanceForRange;
+      const ledger = [...withRunning].reverse();
+
       return wait({
         supplier,
         purchases,
         payments,
         ledger,
+        opening_balance: openingBalanceForRange,
+        closing_balance: closingBalance,
+        filters: { start_date: startDate, end_date: endDate, branch_id: branchFilter },
+        summary: {
+          opening_balance: openingBalanceForRange,
+          ...totals,
+          closing_balance: closingBalance,
+          outstanding_balance: closingBalance,
+        },
         totals: {
           total_purchases: Number(supplier?.total_ordered) || 0,
           total_paid: Number(supplier?.total_paid) || 0,
@@ -2843,33 +3119,52 @@ const rawApi = {
         },
       });
     },
-    getLedger: (id) => {
-      const supplier = db.suppliers.find((s) => s.id === id);
-      const purchases = db.purchases.filter((p) => Number(p.supplier_id) === id);
-      const payments = db.supplierPayments.filter((p) => Number(p.supplier_id) === id);
-      const ledger = [
-        ...purchases
-          .filter((p) => !["Cancelled", "Draft"].includes(p.status))
-          .map((p) => ({
-            entry_date: p.created_at,
-            entry_type: "purchase",
-            reference: p.po_number,
-            description: `Purchase ${p.po_number} (${p.status})`,
-            debit: Number(p.total) || 0,
-            credit: 0,
-          })),
-        ...payments.map((p) => ({
-          entry_date: p.created_at,
-          entry_type: "supplier_payment",
-          reference: p.method,
-          description: `Payment via ${p.method}`,
-          debit: 0,
-          credit: Number(p.amount) || 0,
-        })),
-      ].sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)));
-      return wait({ supplier, purchases, payments, ledger });
+    getLedger: (id) => rawApi.suppliers.getStatement(id),
+    addStatementEntry: (payload) => {
+      const supplier = db.suppliers.find((s) => s.id === Number(payload?.supplier_id));
+      if (!supplier) return wait({ success: false, error: "Supplier not found." });
+      const entryType = String(payload?.entry_type || "");
+      if (!["debit_note", "credit_note", "adjustment"].includes(entryType)) {
+        return wait({ success: false, error: "entry_type must be debit_note, credit_note, or adjustment." });
+      }
+      const amount = Number(payload?.amount) || 0;
+      if (amount <= 0) return wait({ success: false, error: "Amount must be positive." });
+      const side = entryType === "debit_note" ? "debit" : entryType === "credit_note" ? "credit" : String(payload?.side || "debit");
+      const row = {
+        id: nextId("supplierLedgerAdjustment"),
+        supplier_id: supplier.id,
+        branch_id: payload?.branch_id ? Number(payload.branch_id) : null,
+        entry_type: entryType,
+        entry_date: payload?.entry_date ? String(payload.entry_date).slice(0, 10) : nowIso().slice(0, 10),
+        reference: payload?.reference || null,
+        description: payload?.description || null,
+        debit: side === "debit" ? amount : 0,
+        credit: side === "credit" ? amount : 0,
+        notes: payload?.notes || null,
+        created_at: nowIso(),
+      };
+      db.supplierLedgerAdjustments = db.supplierLedgerAdjustments || [];
+      db.supplierLedgerAdjustments.unshift(row);
+      recomputeSupplierBalanceMock(supplier.id);
+      logAudit(`supplier_${entryType}`, "suppliers", { supplier_id: supplier.id, entry_type: entryType, amount, side });
+      persist();
+      return wait({ success: true, entry: row });
+    },
+    deleteStatementEntry: (id) => {
+      const entry = (db.supplierLedgerAdjustments || []).find((a) => a.id === Number(id));
+      if (!entry) return wait({ success: false, error: "Entry not found." });
+      db.supplierLedgerAdjustments = db.supplierLedgerAdjustments.filter((a) => a.id !== Number(id));
+      if (entry.supplier_id) recomputeSupplierBalanceMock(entry.supplier_id);
+      logAudit("supplier_statement_entry_delete", "suppliers", { id: entry.id, entry_type: entry.entry_type });
+      persist();
+      return wait({ success: true });
     },
     getPurchaseHistory: (id) => wait(db.purchases.filter((purchase) => Number(purchase.supplier_id) === id)),
+    emailStatement: ({ supplier_id } = {}) => {
+      const supplier = db.suppliers.find((s) => s.id === Number(supplier_id));
+      logAudit("supplier_statement_email", "suppliers", { supplier_id, supplier: supplier?.name });
+      return wait({ success: true, id: `demo-${Date.now()}`, provider: "demo" });
+    },
   },
   purchases: {
     getAll: () =>
@@ -2893,6 +3188,7 @@ const rawApi = {
           qty_ordered: Number(item.qty_ordered ?? item.qty) || 0,
           qty_received: Number(item.qty_received) || 0,
           cost: Number(item.cost) || 0,
+          price: item.price != null ? Number(item.price) : null,
           discount: Number(item.discount) || 0,
           tax: Number(item.tax) || 0,
         }))
@@ -3000,6 +3296,7 @@ const rawApi = {
       const items = (purchase.items || []).map((item) => {
         const qty = Number(item.qty) || 0;
         const cost = Number(item.cost) || 0;
+        const price = item.price !== undefined && item.price !== null && item.price !== "" ? Number(item.price) : null;
         const discount = Number(item.discount) || 0;
         const tax = Number(item.tax ?? item.tax_rate) || 0;
         const base = Math.max(0, qty * cost - discount);
@@ -3010,6 +3307,7 @@ const rawApi = {
           qty_ordered: qty,
           qty_received: 0,
           cost,
+          price,
           discount,
           tax,
           line_total,
@@ -3028,7 +3326,11 @@ const rawApi = {
       const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
       const seq = db.purchases.filter((p) => String(p.po_number || "").includes(day)).length + 1;
       const po_number = purchase.po_number || `PO-${day}-${String(seq).padStart(4, "0")}`;
-      const status = purchase.status || "Pending";
+      let status = purchase.status || "Pending";
+      if (status === "Ordered" || status === "Approve") status = "Approved";
+      if (status === "Pending Approval" || status === "PendingApproval") status = "Pending";
+      const wantsApprove = ["Approved", "Received", "PartiallyReceived"].includes(status);
+      const insertStatus = wantsApprove ? "Pending" : status;
       const record = {
         id,
         po_number,
@@ -3036,9 +3338,9 @@ const rawApi = {
         supplier,
         invoice_no: invoiceNo,
         total,
-        amount_paid,
-        balance: Math.max(0, total - amount_paid),
-        status,
+        amount_paid: 0,
+        balance: total,
+        status: insertStatus,
         notes: purchase.notes || null,
         attachment_url: purchase.attachment_url || null,
         client_reference: purchase.client_reference || null,
@@ -3047,36 +3349,74 @@ const rawApi = {
         created_at: new Date().toISOString().slice(0, 10),
         item_count: items.length,
         items,
+        inventory_posted_at: null,
+        accounting_posted_at: null,
       };
       db.purchases.unshift(record);
-      if (amount_paid > 0) {
-        (db.purchasePayments || (db.purchasePayments = [])).unshift({
-          id: nextId("purchasePayment"),
-          purchase_id: id,
-          supplier_id: purchase.supplier_id,
-          amount: amount_paid,
-          method: purchase.payment_method || "Cash",
-          created_at: nowIso(),
-        });
-      }
-      items.forEach((item) => {
-        db.products = db.products.map((product) =>
-          product.id === item.product_id ? { ...product, cost: item.cost } : product
-        );
-      });
-      logAudit("create_purchase", "purchases", { po_number });
+      // Nothing posts to inventory or supplier AP before Approval.
+      logAudit("create_purchase", "purchases", { po_number, status: insertStatus });
       persist();
+      if (wantsApprove) {
+        return rawApi.purchases.approve(id);
+      }
       return wait({ success: true, id, po_number, total, purchase: record });
+    },
+    approve: (idOrOpts) => {
+      const opts = typeof idOrOpts === "object" ? idOrOpts : { id: idOrOpts };
+      const id = Number(opts.id);
+      const purchase = db.purchases.find((item) => item.id === id);
+      if (!purchase) return wait({ success: false, error: "Purchase not found." });
+      if (["Approved", "Received", "PartiallyReceived"].includes(purchase.status)) {
+        return wait({ success: true, id, status: purchase.status === "Ordered" ? "Approved" : purchase.status, already_approved: true });
+      }
+      if (["Cancelled", "Rejected"].includes(purchase.status)) {
+        return wait({ success: false, error: "Cancelled or rejected purchases cannot be approved." });
+      }
+      const stamp = nowIso();
+      purchase.invoice_no = purchase.invoice_no || purchase.po_number || `PI-${purchase.id}`;
+      purchase.status = "Approved";
+      purchase.approved_at = stamp;
+      purchase.accounting_posted_at = stamp;
+      // Full inventory + avg cost on approval
+      const received = rawApi.purchases.receive({ id, receive_all: true, from_approve: true });
+      return Promise.resolve(received).then((result) => {
+        if (result?.success === false) {
+          purchase.status = "Pending";
+          purchase.approved_at = null;
+          purchase.accounting_posted_at = null;
+          purchase.inventory_posted_at = null;
+          persist();
+          return result;
+        }
+        purchase.status = "Approved";
+        purchase.inventory_posted_at = stamp;
+        if (purchase.supplier_id) recomputeSupplierBalanceMock(purchase.supplier_id);
+        logAudit("approve_purchase", "purchases", { id, po_number: purchase.po_number });
+        persist();
+        return {
+          success: true,
+          id,
+          status: "Approved",
+          invoice_no: purchase.invoice_no,
+          qty_received: result?.qty_received || 0,
+          stock_value: result?.stock_value || 0,
+        };
+      });
     },
     update: (payload) => {
       const purchase = db.purchases.find((p) => p.id === Number(payload.id));
       if (!purchase) return wait({ success: false, error: "Purchase not found." });
+      const statusChanged = payload.status !== undefined && payload.status !== purchase.status;
       Object.assign(purchase, {
         notes: payload.notes !== undefined ? payload.notes : purchase.notes,
         attachment_url: payload.attachment_url !== undefined ? payload.attachment_url : purchase.attachment_url,
         invoice_no: payload.invoice_no !== undefined ? payload.invoice_no : purchase.invoice_no,
         status: payload.status || purchase.status,
       });
+      if (statusChanged && purchase.supplier_id) {
+        recomputeSupplierBalanceMock(purchase.supplier_id);
+      }
+      logAudit("update_purchase", "purchases", { id: purchase.id, po_number: purchase.po_number });
       persist();
       return wait({ success: true, purchase });
     },
@@ -3087,7 +3427,17 @@ const rawApi = {
       if (!purchase) return wait({ success: false, error: "Purchase not found." });
       if (purchase.status === "Received") return wait({ success: false, error: "Purchase already fully received." });
       if (purchase.status === "Cancelled") return wait({ success: false, error: "Cancelled purchases cannot be received." });
-      if (purchase.status === "Draft") return wait({ success: false, error: "Draft purchases must be submitted before receiving." });
+      if (purchase.status === "Draft") return wait({ success: false, error: "Draft purchases must be submitted and approved before receiving." });
+      if (purchase.status === "Pending" && !opts.from_approve) {
+        return wait({ success: false, error: "Purchase must be Approved before stock/accounting updates." });
+      }
+      if (purchase.inventory_posted_at && !opts.from_approve) {
+        purchase.status = "Received";
+        purchase.received_at = nowIso();
+        if (purchase.supplier_id) recomputeSupplierBalanceMock(purchase.supplier_id);
+        persist();
+        return wait({ success: true, status: "Received", qty_received: 0, already_posted: true });
+      }
 
       const items = (purchase.items || []).map((item) => ({
         ...item,
@@ -3097,7 +3447,11 @@ const rawApi = {
       const lineOverrides = Array.isArray(opts.lines) ? opts.lines : null;
       const receiveAll = opts.receive_all !== false && !lineOverrides;
       let stockedQty = 0;
-      const wasFirst = !["Received", "PartiallyReceived"].includes(purchase.status);
+      let stockedValue = 0;
+      // Enterprise rule: every approved purchase receives into the Main Store —
+      // never into any other warehouse. Sales-facing warehouses only ever get
+      // stock via an explicit Stock Transfer out of the Main Store.
+      const mainWarehouseId = resolveMainWarehouseIdMock(db);
 
       items.forEach((item, i) => {
         const ordered = item.qty_ordered;
@@ -3112,17 +3466,36 @@ const rawApi = {
           toReceive = Math.max(0, ordered - already);
         }
         if (toReceive <= 0) return;
-        db.products = db.products.map((product) =>
-          product.id === item.product_id
-            ? { ...product, stock: product.stock + toReceive, cost: item.cost != null ? item.cost : product.cost }
-            : product
-        );
+        db.products = db.products.map((product) => {
+          if (product.id !== item.product_id) return product;
+          const prevStock = Number(product.stock) || 0;
+          const prevAvg = Number(product.avg_cost != null ? product.avg_cost : product.cost) || 0;
+          const unitCost = item.cost != null ? Number(item.cost) : prevAvg;
+          const nextStock = prevStock + toReceive;
+          const nextAvg = prevStock <= 0 ? unitCost : (prevStock * prevAvg + toReceive * unitCost) / nextStock;
+          stockedValue += toReceive * unitCost;
+          return {
+            ...product,
+            stock: nextStock,
+            cost: unitCost,
+            last_cost: unitCost,
+            avg_cost: nextAvg,
+          };
+        });
+        applyStockDelta(db, {
+          product_id: item.product_id,
+          warehouse_id: mainWarehouseId,
+          qty: toReceive,
+          batch_number: item.batch_no || null,
+          expiry_date: item.expiry_date || null,
+        });
         (db.stockMovements || (db.stockMovements = [])).unshift({
           id: nextId("stockMovement"),
           product_id: item.product_id,
+          warehouse_id: mainWarehouseId,
           type: "in",
           qty: toReceive,
-          note: `Purchase receive ${purchase.po_number}`,
+          note: `Purchase receive ${purchase.po_number} → Main Store`,
           created_at: nowIso(),
         });
         item.qty_received = already + toReceive;
@@ -3132,27 +3505,22 @@ const rawApi = {
       if (stockedQty <= 0) return wait({ success: false, error: "No quantities to receive." });
 
       const allReceived = items.every((it) => it.qty_received >= it.qty_ordered);
-      const nextStatus = allReceived ? "Received" : "PartiallyReceived";
+      const nextStatus = opts.from_approve ? "Approved" : allReceived ? "Received" : "PartiallyReceived";
       purchase.items = items;
       purchase.status = nextStatus;
+      purchase.warehouse_id = mainWarehouseId;
       purchase.received_at = nowIso();
+      purchase.inventory_posted_at = purchase.inventory_posted_at || nowIso();
 
-      if (wasFirst && purchase.supplier_id) {
+      if (purchase.supplier_id) {
         db.suppliers = db.suppliers.map((supplier) =>
-          supplier.id === Number(purchase.supplier_id)
-            ? {
-                ...supplier,
-                balance: Number(supplier.balance) + Number(purchase.total) - Number(purchase.amount_paid || 0),
-                order_count: (supplier.order_count || 0) + 1,
-                total_ordered: (supplier.total_ordered || 0) + Number(purchase.total),
-                last_purchase_at: nowIso(),
-              }
-            : supplier
+          supplier.id === Number(purchase.supplier_id) ? { ...supplier, last_purchase_at: nowIso() } : supplier
         );
+        recomputeSupplierBalanceMock(purchase.supplier_id);
       }
-      logAudit("receive_purchase", "purchases", { id, status: nextStatus });
+      logAudit(opts.from_approve ? "approve_purchase_stock" : "receive_purchase", "purchases", { id, status: nextStatus });
       persist();
-      return wait({ success: true, status: nextStatus, qty_received: stockedQty });
+      return wait({ success: true, status: nextStatus, qty_received: stockedQty, stock_value: stockedValue });
     },
     addPayment: (payload) => {
       const {
@@ -3188,29 +3556,15 @@ const rawApi = {
         payment_date: payment_date || nowIso().slice(0, 10),
         created_at: nowIso(),
       });
-      if (["Received", "PartiallyReceived"].includes(purchase.status) && purchase.supplier_id) {
+      // The payment is recorded once (purchasePayments, tagged with supplier_id above);
+      // supplier_ledger_v-equivalent recompute reads that directly, so we must not also
+      // insert into supplierPayments here or the payment would be double-counted. An
+      // invoice is payable as soon as it is booked, not only once received.
+      if (purchase.supplier_id) {
+        recomputeSupplierBalanceMock(purchase.supplier_id);
         db.suppliers = db.suppliers.map((supplier) =>
-          supplier.id === Number(purchase.supplier_id)
-            ? {
-                ...supplier,
-                balance: Math.max(0, Number(supplier.balance) - baseAmount),
-                total_paid: Number(supplier.total_paid || 0) + baseAmount,
-                last_payment_at: nowIso(),
-              }
-            : supplier
+          supplier.id === Number(purchase.supplier_id) ? { ...supplier, last_payment_at: nowIso() } : supplier
         );
-        db.supplierPayments.unshift({
-          id: nextId("supplierPayment"),
-          supplier_id: purchase.supplier_id,
-          amount: amt,
-          method: method || "Cash",
-          purchase_id: purchase.id,
-          payment_currency: payCurrency,
-          exchange_rate: rate,
-          original_amount: amt,
-          base_amount: baseAmount,
-          created_at: nowIso(),
-        });
       }
       logAudit("purchase_payment", "purchases", { purchase_id, amount: amt, base_amount: baseAmount, payment_currency: payCurrency });
       persist();
@@ -3224,27 +3578,40 @@ const rawApi = {
       }
       purchase.status = "Cancelled";
       purchase.cancelled_at = nowIso();
+      if (purchase.supplier_id) recomputeSupplierBalanceMock(purchase.supplier_id);
+      logAudit("cancel_purchase", "purchases", { id: purchase.id, po_number: purchase.po_number });
       persist();
       return wait({ success: true });
     },
     updateStatus: (id, status, extra = {}) => {
+      let next = status;
+      if (next === "Ordered" || next === "Approve") next = "Approved";
+      if (next === "Pending Approval" || next === "PendingApproval") next = "Pending";
+      if (next === "Approved") return rawApi.purchases.approve(id);
       if (status === "Cancelled") {
         const purchase = db.purchases.find((p) => p.id === Number(id));
         if (!purchase) return wait({ success: false, error: "Purchase not found." });
-        if (["Received", "PartiallyReceived"].includes(purchase.status)) {
-          return wait({ success: false, error: "Received purchases cannot be cancelled — use returns." });
+        if (["Received", "PartiallyReceived", "Approved"].includes(purchase.status) || purchase.inventory_posted_at) {
+          return wait({ success: false, error: "Approved/received purchases cannot be cancelled — use returns." });
         }
         purchase.status = "Cancelled";
         purchase.cancelled_at = nowIso();
+        if (purchase.supplier_id) recomputeSupplierBalanceMock(purchase.supplier_id);
+        logAudit("cancel_purchase", "purchases", { id: purchase.id, po_number: purchase.po_number });
         persist();
         return wait({ success: true });
       }
       if (status === "Rejected") {
         const purchase = db.purchases.find((p) => p.id === Number(id));
         if (!purchase) return wait({ success: false, error: "Purchase not found." });
+        if (purchase.inventory_posted_at) {
+          return wait({ success: false, error: "Approved purchases with posted inventory cannot be rejected — use returns." });
+        }
         purchase.status = "Rejected";
         purchase.rejected_at = nowIso();
         purchase.rejection_reason = extra.rejection_reason || extra.reason || "Rejected";
+        if (purchase.supplier_id) recomputeSupplierBalanceMock(purchase.supplier_id);
+        logAudit("reject_purchase", "purchases", { id: purchase.id, po_number: purchase.po_number });
         persist();
         return wait({ success: true, status: "Rejected" });
       }
@@ -3252,15 +3619,15 @@ const rawApi = {
         item.id === Number(id)
           ? {
               ...item,
-              status,
-              ...(status === "Ordered"
-                ? { ordered_at: nowIso(), approved_at: nowIso() }
-                : {}),
+              status: next,
+              ...(next === "Pending" ? { ordered_at: nowIso() } : {}),
             }
           : item
       );
+      // Pre-approval status changes never touch supplier AP.
+      logAudit("update_purchase_status", "purchases", { id, status: next });
       persist();
-      return wait({ success: true, status });
+      return wait({ success: true, status: next });
     },
     createReturn: (ret) => {
       const id = nextId("purchaseReturn");
@@ -3268,16 +3635,18 @@ const rawApi = {
       if (!purchase || !["Received", "PartiallyReceived"].includes(purchase.status)) {
         return wait({ success: false, error: "Only received purchases can be returned." });
       }
-      db.purchaseReturns.unshift({ id, ...ret, created_at: nowIso() });
+      db.purchaseReturns.unshift({
+        id,
+        ...ret,
+        supplier_id: ret.supplier_id || purchase.supplier_id || null,
+        branch_id: ret.branch_id || purchase.branch_id || null,
+        created_at: nowIso(),
+      });
       db.products = db.products.map((product) =>
         product.id === ret.product_id ? { ...product, stock: Math.max(0, product.stock - ret.qty) } : product
       );
       if (purchase?.supplier_id) {
-        db.suppliers = db.suppliers.map((supplier) =>
-          supplier.id === Number(purchase.supplier_id)
-            ? { ...supplier, balance: Math.max(0, supplier.balance - ret.qty * ret.cost) }
-            : supplier
-        );
+        recomputeSupplierBalanceMock(purchase.supplier_id);
       }
       logAudit("purchase_return", "purchases", { id });
       persist();
@@ -3295,7 +3664,16 @@ const rawApi = {
         Number(to_warehouse_id) ||
         (db.warehouses || []).find((w) => w.branch_id === Number(to_branch_id))?.id ||
         defaultWarehouseId(to_branch_id);
+      if (!fromWh || !toWh) {
+        return wait({ success: false, error: "Both a source and destination warehouse are required for a stock transfer." });
+      }
       if (fromWh === toWh) return wait({ success: false, error: "Source and destination warehouses must differ." });
+      // Enterprise rule: every transfer must touch the Main Store on one side —
+      // out of it to stock a branch/store, or back into it as a return.
+      const mainWarehouseId = resolveMainWarehouseIdMock(db);
+      if (mainWarehouseId && fromWh !== mainWarehouseId && toWh !== mainWarehouseId) {
+        return wait({ success: false, error: "Stock transfers must originate from or return to the Main Store warehouse." });
+      }
       const amount = Number(qty);
       if (amount <= 0) return wait({ success: false, error: "Quantity must be positive." });
 
@@ -3358,7 +3736,14 @@ const rawApi = {
         expiry_date,
         note: note || `Transfer from warehouse ${fromWh}`,
       });
-      logAudit("stock_transfer", "inventory", { id, product_id, qty: amount });
+      logAudit("stock_transfer", "inventory", {
+        id,
+        product_id,
+        qty: amount,
+        from_warehouse_id: fromWh,
+        to_warehouse_id: toWh,
+        direction: fromWh === mainWarehouseId ? "main_store_to_warehouse" : "warehouse_to_main_store",
+      });
       persist();
       return wait({ success: true, id });
     },
@@ -3396,12 +3781,46 @@ const rawApi = {
         })
       );
     },
-    stockIn: ({ product_id, variant_id, warehouse_id, qty, batch_number, expiry_date, note }) => {
+    stockIn: ({ product_id, variant_id, warehouse_id, qty, batch_number, expiry_date, note, serials, serial_numbers }) => {
       const amount = Number(qty);
       if (!product_id || !warehouse_id || !(amount > 0)) {
         return wait({ success: false, error: "Product, warehouse, and positive quantity are required." });
       }
       applyStockDelta(db, { product_id, variant_id, warehouse_id, qty: amount, batch_number, expiry_date });
+      const product = db.products.find((p) => p.id === Number(product_id));
+      db.stockLots = db.stockLots || [];
+      const lot = {
+        id: nextId("stockLot"),
+        product_id: Number(product_id),
+        variant_id: variant_id ? Number(variant_id) : null,
+        warehouse_id: Number(warehouse_id),
+        batch_number: batch_number || null,
+        qty_received: amount,
+        qty_remaining: amount,
+        unit_cost: Number(product?.avg_cost || product?.cost || 0),
+        received_at: nowIso(),
+        expiry_date: expiry_date || null,
+        reference_type: "in",
+      };
+      db.stockLots.unshift(lot);
+      const serialList = (Array.isArray(serials) ? serials : String(serial_numbers || "").split(/[,;\n]+/))
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      if (serialList.length) {
+        db.productSerials = db.productSerials || [];
+        for (const serial_number of serialList) {
+          db.productSerials.unshift({
+            id: nextId("productSerial"),
+            product_id: Number(product_id),
+            variant_id: variant_id ? Number(variant_id) : null,
+            warehouse_id: Number(warehouse_id),
+            lot_id: lot.id,
+            serial_number,
+            status: "available",
+            received_at: nowIso(),
+          });
+        }
+      }
       const movement = recordStockMovement({
         type: "in",
         product_id,
@@ -3416,7 +3835,7 @@ const rawApi = {
       persist();
       return wait({ success: true, id: movement.id });
     },
-    stockOut: ({ product_id, variant_id, warehouse_id, qty, batch_number, expiry_date, note }) => {
+    stockOut: ({ product_id, variant_id, warehouse_id, qty, batch_number, expiry_date, note, serials, serial_numbers }) => {
       const amount = Number(qty);
       if (!product_id || !warehouse_id || !(amount > 0)) {
         return wait({ success: false, error: "Product, warehouse, and positive quantity are required." });
@@ -3431,6 +3850,55 @@ const rawApi = {
         .reduce((sum, row) => sum + Number(row.qty), 0);
       if (available < amount) return wait({ success: false, error: "Insufficient warehouse stock." });
       applyStockDelta(db, { product_id, variant_id, warehouse_id, qty: -amount, batch_number, expiry_date });
+      const product = db.products.find((p) => p.id === Number(product_id));
+      const pref = String(product?.stock_preference || "fifo").toLowerCase() === "fefo" ? "fefo" : "fifo";
+      let lots = (db.stockLots || []).filter(
+        (r) =>
+          Number(r.product_id) === Number(product_id) &&
+          Number(r.qty_remaining) > 0 &&
+          (!warehouse_id || Number(r.warehouse_id) === Number(warehouse_id))
+      );
+      lots =
+        pref === "fefo"
+          ? lots.sort((a, b) => {
+              const ae = a.expiry_date || "9999-12-31";
+              const be = b.expiry_date || "9999-12-31";
+              if (ae !== be) return ae < be ? -1 : 1;
+              return String(a.received_at).localeCompare(String(b.received_at));
+            })
+          : lots.sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)));
+      let left = amount;
+      db.stockLotAllocations = db.stockLotAllocations || [];
+      for (const lot of lots) {
+        if (left <= 0) break;
+        const take = Math.min(Number(lot.qty_remaining), left);
+        if (take <= 0) continue;
+        lot.qty_remaining = Number(lot.qty_remaining) - take;
+        db.stockLotAllocations.unshift({
+          id: nextId("stockLotAllocation"),
+          lot_id: lot.id,
+          product_id: Number(product_id),
+          qty: take,
+          unit_cost: Number(lot.unit_cost || 0),
+          reference_type: "out",
+          created_at: nowIso(),
+        });
+        left -= take;
+      }
+      const serialList = (Array.isArray(serials) ? serials : String(serial_numbers || "").split(/[,;\n]+/))
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      if (serialList.length) {
+        for (const sn of serialList) {
+          const row = (db.productSerials || []).find(
+            (r) => r.serial_number === sn && r.status === "available"
+          );
+          if (row) {
+            row.status = "sold";
+            row.sold_at = nowIso();
+          }
+        }
+      }
       const movement = recordStockMovement({
         type: "out",
         product_id,
@@ -3574,6 +4042,165 @@ const rawApi = {
       persist();
       return wait({ success: true });
     },
+    listVariantSkus: (params = {}) => {
+      let rows = [...(db.productVariantSkus || [])];
+      if (params.product_id || params.productId) {
+        rows = rows.filter((r) => Number(r.product_id) === Number(params.product_id || params.productId));
+      }
+      return wait(rows.slice(0, Number(params.limit) || 500));
+    },
+    upsertVariantSku: (payload = {}) => {
+      db.productVariantSkus = db.productVariantSkus || [];
+      const productId = Number(payload.product_id || payload.productId);
+      const name = String(payload.name || "").trim();
+      if (!productId || !name) return wait({ success: false, error: "Product and variant name are required." });
+      const sku = payload.sku ? String(payload.sku).trim() : null;
+      const barcode = payload.barcode ? String(payload.barcode).trim() : null;
+      if (sku && db.productVariantSkus.some((r) => r.sku === sku && Number(r.id) !== Number(payload.id || 0))) {
+        return wait({ success: false, error: "Variant SKU or barcode already exists." });
+      }
+      if (barcode && db.productVariantSkus.some((r) => r.barcode === barcode && Number(r.id) !== Number(payload.id || 0))) {
+        return wait({ success: false, error: "Variant SKU or barcode already exists." });
+      }
+      const attributes =
+        payload.attributes && typeof payload.attributes === "object" && !Array.isArray(payload.attributes)
+          ? payload.attributes
+          : {};
+      if (payload.id) {
+        const row = db.productVariantSkus.find((r) => Number(r.id) === Number(payload.id));
+        if (!row) return wait({ success: false, error: "Variant not found." });
+        Object.assign(row, {
+          product_id: productId,
+          name,
+          sku,
+          barcode,
+          attributes,
+          price: payload.price == null || payload.price === "" ? null : Number(payload.price),
+          cost: Number(payload.cost || 0),
+          active: payload.active !== false,
+          updated_at: nowIso(),
+        });
+        persist();
+        return wait({ success: true, variant: row });
+      }
+      const variant = {
+        id: nextId("variantSku"),
+        product_id: productId,
+        name,
+        sku,
+        barcode,
+        attributes,
+        price: payload.price == null || payload.price === "" ? null : Number(payload.price),
+        cost: Number(payload.cost || 0),
+        stock: Number(payload.stock || 0),
+        active: payload.active !== false,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      db.productVariantSkus.push(variant);
+      persist();
+      return wait({ success: true, variant });
+    },
+    listSerials: (params = {}) => {
+      let rows = [...(db.productSerials || [])];
+      if (params.product_id || params.productId) {
+        rows = rows.filter((r) => Number(r.product_id) === Number(params.product_id || params.productId));
+      }
+      if (params.status) rows = rows.filter((r) => r.status === params.status);
+      return wait(rows.slice(0, Number(params.limit) || 200));
+    },
+    registerSerials: (payload = {}) => {
+      db.productSerials = db.productSerials || [];
+      const productId = Number(payload.product_id || payload.productId);
+      const list = (Array.isArray(payload.serials)
+        ? payload.serials
+        : String(payload.serial_numbers || "").split(/[,;\n]+/)
+      )
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      if (!productId || !list.length) return wait({ success: true, inserted: 0 });
+      for (const serial of list) {
+        if (db.productSerials.some((r) => String(r.serial_number).toLowerCase() === serial.toLowerCase())) {
+          return wait({ success: false, error: "Duplicate serial number for this company." });
+        }
+      }
+      const rows = list.map((serial_number) => ({
+        id: nextId("productSerial"),
+        product_id: productId,
+        variant_id: payload.variant_id || null,
+        warehouse_id: payload.warehouse_id || null,
+        lot_id: payload.lot_id || null,
+        serial_number,
+        status: "available",
+        received_at: nowIso(),
+      }));
+      db.productSerials.unshift(...rows);
+      persist();
+      return wait({ success: true, inserted: rows.length });
+    },
+    listOpenLots: (params = {}) => {
+      let rows = (db.stockLots || []).filter((r) => Number(r.qty_remaining) > 0);
+      if (params.product_id || params.productId) {
+        rows = rows.filter((r) => Number(r.product_id) === Number(params.product_id || params.productId));
+      }
+      if (params.warehouse_id) {
+        rows = rows.filter((r) => Number(r.warehouse_id) === Number(params.warehouse_id));
+      }
+      rows.sort((a, b) => {
+        const ae = a.expiry_date || "9999-12-31";
+        const be = b.expiry_date || "9999-12-31";
+        if (ae !== be) return ae < be ? -1 : 1;
+        return String(a.received_at).localeCompare(String(b.received_at));
+      });
+      return wait(rows.slice(0, Number(params.limit) || 200));
+    },
+    previewLotPick: (params = {}) => {
+      const productId = Number(params.product_id);
+      const qty = Math.abs(Number(params.qty) || 1);
+      if (!productId) return wait({ success: false, error: "product_id required." });
+      let pref = String(params.preference || "").toLowerCase();
+      if (!pref || pref === "auto") {
+        const prod = db.products.find((p) => p.id === productId);
+        pref = String(prod?.stock_preference || "fifo").toLowerCase();
+      }
+      let lots = (db.stockLots || []).filter(
+        (r) => Number(r.product_id) === productId && Number(r.qty_remaining) > 0
+      );
+      if (params.warehouse_id) {
+        lots = lots.filter((r) => Number(r.warehouse_id) === Number(params.warehouse_id));
+      }
+      const ordered =
+        pref === "fefo"
+          ? [...lots].sort((a, b) => {
+              const ae = a.expiry_date || "9999-12-31";
+              const be = b.expiry_date || "9999-12-31";
+              if (ae !== be) return ae < be ? -1 : 1;
+              return String(a.received_at).localeCompare(String(b.received_at));
+            })
+          : [...lots].sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)));
+      let left = qty;
+      const plan = [];
+      for (const lot of ordered) {
+        if (left <= 0) break;
+        const take = Math.min(Number(lot.qty_remaining), left);
+        if (take <= 0) continue;
+        plan.push({
+          lot_id: lot.id,
+          batch_number: lot.batch_number,
+          expiry_date: lot.expiry_date,
+          received_at: lot.received_at,
+          qty: take,
+          unit_cost: Number(lot.unit_cost || 0),
+        });
+        left -= take;
+      }
+      return wait({
+        success: left <= 0,
+        preference: pref === "fefo" ? "fefo" : "fifo",
+        plan,
+        shortfall: left,
+      });
+    },
   },
   barcode: {
     listStatus: () => {
@@ -3680,7 +4307,7 @@ const rawApi = {
       const labelSize = resolveLabelSize(size);
       const format = db.settings.barcode_format || "EAN-13";
       const currency = getCurrency(db.settings.currency || "KES");
-      const storeName = db.settings.store_name || "Nexora POS";
+      const storeName = db.settings.store_name || "Nexora POS Pro";
       const labels = ids
         .map((id) => {
           const product = db.products.find((p) => p.id === id);
@@ -3754,6 +4381,110 @@ const rawApi = {
       return wait({ monthTotal, byCategory });
     },
   },
+  payroll: {
+    getSettings: () => wait({ currency_code: "KES", paye_enabled: true, nssf_enabled: true, nhif_sha_enabled: true }),
+    updateSettings: () => wait({ success: true }),
+    listEmployees: () => wait([]),
+    getEmployee: () => wait({ success: false, error: "Mock mode — use live API" }),
+    createEmployee: () => wait({ success: false, error: "Mock mode — use live API" }),
+    updateEmployee: () => wait({ success: false, error: "Mock mode — use live API" }),
+    deleteEmployee: () => wait({ success: false, error: "Mock mode — use live API" }),
+    addDocument: () => wait({ success: false, error: "Mock mode — use live API" }),
+    listAttendance: () => wait([]),
+    checkIn: () => wait({ success: false, error: "Mock mode — use live API" }),
+    checkOut: () => wait({ success: false, error: "Mock mode — use live API" }),
+    recordAttendance: () => wait({ success: false, error: "Mock mode — use live API" }),
+    listLeave: () => wait([]),
+    requestLeave: () => wait({ success: false, error: "Mock mode — use live API" }),
+    approveLeave: () => wait({ success: false, error: "Mock mode — use live API" }),
+    rejectLeave: () => wait({ success: false, error: "Mock mode — use live API" }),
+    getLeaveBalances: () => wait([]),
+    listSalaryStructures: () => wait([]),
+    upsertSalaryStructure: () => wait({ success: false, error: "Mock mode — use live API" }),
+    listLoans: () => wait([]),
+    createLoan: () => wait({ success: false, error: "Mock mode — use live API" }),
+    listRuns: () => wait([]),
+    createRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    previewRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    regenerateRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    approveRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    lockRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    unlockRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    rollbackRun: () => wait({ success: false, error: "Mock mode — use live API" }),
+    listPayslips: () => wait([]),
+    getPayslip: () => wait({ success: false, error: "Mock mode — use live API" }),
+    bankExport: () => wait({ success: false, error: "Mock mode — use live API" }),
+    getDashboard: () =>
+      wait({
+        success: true,
+        active_employees: 0,
+        pending_leave: 0,
+        latest_run: null,
+        overtime_cost_latest: 0,
+        salary_expense_trend: [],
+        insights: ["Mock API — connect to live backend for payroll."],
+      }),
+    getReports: () => wait({ success: true, monthly: [], yearly: {}, by_department: [] }),
+    selfOverview: () => wait({ success: true, linked: false, message: "Mock mode — link employees on live API." }),
+  },
+  dashboard: {
+    getExtendedStats: () => {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const purchases = Array.isArray(db.purchases) ? db.purchases : [];
+      const products = (Array.isArray(db.products) ? db.products : []).filter((p) => !p.deleted_at);
+      const suppliers = (Array.isArray(db.suppliers) ? db.suppliers : []).filter((s) => !s.deleted_at);
+      const customers = Array.isArray(db.customers) ? db.customers : [];
+
+      const purchasesToday = purchases
+        .filter((p) => String(p.created_at || "").slice(0, 10) === todayStr)
+        .reduce((sum, p) => sum + Number(p.total || 0), 0);
+
+      const inventoryValue = products.reduce(
+        (sum, p) => sum + Number(p.stock || 0) * Number(p.avg_cost != null ? p.avg_cost : p.cost || 0),
+        0
+      );
+      const outOfStock = products.filter((p) => Number(p.stock || 0) <= 0).length;
+      const outstandingPayables = suppliers.reduce((sum, s) => sum + Math.max(0, Number(s.balance || 0)), 0);
+      const outstandingReceivables = customers.reduce((sum, c) => sum + Math.max(0, Number(c.balance || 0)), 0);
+
+      const topCustomers = [...customers]
+        .sort((a, b) => Number(b.spent || 0) - Number(a.spent || 0))
+        .filter((c) => Number(c.spent || 0) > 0)
+        .slice(0, 5)
+        .map((c) => ({ id: c.id, name: c.name, revenue: Number(c.spent || 0) }));
+
+      const supplierById = new Map(suppliers.map((s) => [Number(s.id), s]));
+      const bySupplier = new Map();
+      const byMonth = new Map();
+      for (const p of purchases) {
+        const sid = Number(p.supplier_id);
+        if (sid) bySupplier.set(sid, (bySupplier.get(sid) || 0) + Number(p.total || 0));
+        const monthKey = String(p.created_at || "").slice(0, 7);
+        if (monthKey) byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + Number(p.total || 0));
+      }
+      const topSuppliers = [...bySupplier.entries()]
+        .map(([id, total]) => ({ id, name: supplierById.get(id)?.name || `Supplier #${id}`, total }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 5);
+      const monthlyPurchases = [...byMonth.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([month, total]) => ({ month, total }));
+
+      return wait({
+        success: true,
+        purchases_today: purchasesToday,
+        inventory_value: inventoryValue,
+        total_products: products.length,
+        out_of_stock: outOfStock,
+        total_suppliers: suppliers.length,
+        outstanding_receivables: outstandingReceivables,
+        outstanding_payables: outstandingPayables,
+        top_customers: topCustomers,
+        top_suppliers: topSuppliers,
+        monthly_purchases: monthlyPurchases,
+      });
+    },
+  },
   reports: {
     getAnalytics: (filters = {}) => wait(buildReportAnalytics(db, filters)),
     getUserSales: (filters = {}) => wait({ rows: buildUserSales(filters), range: reportBounds(filters) }),
@@ -3810,7 +4541,7 @@ const rawApi = {
         currency_symbol: getCurrency(db.settings.currency).symbol,
         vat_enabled: db.settings.vat_enabled || "false",
         vat_rate: db.settings.vat_rate || "0",
-        store_name: db.settings.store_name || "Nexora POS Enterprise",
+        store_name: db.settings.store_name || "Nexora POS Pro",
         store_address: db.settings.store_address || "",
         store_phone: db.settings.store_phone || "",
         tax_pin: db.settings.tax_pin || "",
@@ -4544,9 +5275,43 @@ const rawApi = {
         .map((company) => {
           const members = users.filter((user) => String(user.company_id) === String(company.id));
           const localMembers = db.users.filter((user) => Number(user.company_id) === Number(company.id));
+          const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(company.id));
+          const plan = db.plans.find((entry) =>
+            Number(entry.id) === Number(subscription?.plan_id)
+            || entry.code === subscription?.plan_code
+          );
+          const owner =
+            members.find((user) => String(user.id) === String(company.owner_user_id))
+            || members.find((user) => normalizeRole(user.role) === "owner")
+            || localMembers.find((user) => normalizeRole(user.role) === "owner");
+          const trialEnds = subscription?.trial_ends_at || company.trial_ends_at;
+          const trialMs = trialEnds ? new Date(trialEnds).getTime() - Date.now() : 0;
+          const trialDays = trialMs > 0 ? Math.ceil(trialMs / 86400000) : 0;
+          const subStatus = String(subscription?.status || "").toLowerCase();
+          const freeTrialStatus =
+            subStatus === "trialing" || String(subscription?.plan_code || plan?.code || "") === "free_trial"
+              ? (trialDays > 0 ? "Active trial" : "Trial ended")
+              : "Not on trial";
+          const displayStatus = company.status === "inactive" || company.status === "cancelled"
+            ? "disabled"
+            : (company.status === "suspended" ? "suspended" : (subStatus === "expired" ? "expired" : "active"));
           return {
             ...company,
-            subscription_plan: db.plans.find((plan) => plan.id === db.subscriptions.find((row) => Number(row.company_id) === Number(company.id))?.plan_id)?.name || "Unassigned",
+            owner_name: owner?.name || null,
+            owner_email: owner?.email || company.email || null,
+            owner_phone: owner?.phone || company.phone || null,
+            owner_user_id: company.owner_user_id || owner?.id || null,
+            last_login_at: owner?.last_login_at || null,
+            registration_date: company.created_at || null,
+            subscription_plan: plan?.name || subscription?.plan_code || "Unassigned",
+            plan_code: subscription?.plan_code || plan?.code || null,
+            subscription_status: subscription?.status || null,
+            free_trial_status: freeTrialStatus,
+            trial_days: trialDays,
+            paid_until: subscription?.expires_at || null,
+            expires_at: subscription?.expires_at || null,
+            display_status: displayStatus,
+            company_status: displayStatus,
             user_count: Math.max(members.length, localMembers.length),
             active_user_count: Math.max(
               members.filter((user) => user.active).length,
@@ -4860,7 +5625,7 @@ const rawApi = {
       const currency = String(updates.currency ?? company.currency).toUpperCase();
       const email = String(updates.email ?? company.email ?? "").trim().toLowerCase();
       const phone = String(updates.phone ?? company.phone ?? "").trim();
-      if (!name || !isSupportedCurrency(currency) || email && !validEmail(email) || !validPhone(phone)) return wait({ success: false, error: "Enter valid company details." });
+      if (!name || !isSupportedCurrency(currency) || email && !validEmail(email) || phone && !validPhone(phone)) return wait({ success: false, error: "Enter valid company details." });
       if (db.companies.some((entry) => entry.id !== company.id && entry.name.toLowerCase() === name.toLowerCase())) return wait({ success: false, error: "Company name already exists." });
       const previousStatus = company.status;
       Object.assign(company, {
@@ -4873,12 +5638,154 @@ const rawApi = {
         address: String(updates.address ?? company.address ?? "").trim(),
         time_zone: String(updates.time_zone ?? company.time_zone ?? "UTC").trim(),
         logo: String(updates.logo ?? company.logo ?? ""),
-        status: updates.status === "inactive" ? "inactive" : "active",
+        status: updates.status != null
+          ? (["inactive", "cancelled", "disabled"].includes(String(updates.status)) ? "cancelled"
+            : (updates.status === "suspended" ? "suspended" : "active"))
+          : company.status,
       });
       const action = previousStatus !== company.status ? `company_${company.status === "active" ? "activated" : "deactivated"}` : "company_updated";
       logAudit(action, "owner_management", { company_id: company.id, status: company.status });
       persist();
       return wait({ success: true });
+    },
+    activateCompany: (id) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const company = db.companies.find((entry) => Number(entry.id) === Number(id));
+      if (!company) return wait({ success: false, error: "Company not found." });
+      company.status = "active";
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(id));
+      if (subscription) {
+        subscription.status = "active";
+        subscription.updated_at = nowIso();
+      }
+      logAudit("company_activated", "owner_management", { company_id: Number(id) });
+      persist();
+      return wait({ success: true });
+    },
+    deactivateCompany: (id) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const company = db.companies.find((entry) => Number(entry.id) === Number(id));
+      if (!company) return wait({ success: false, error: "Company not found." });
+      company.status = "cancelled";
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(id));
+      if (subscription) {
+        subscription.status = "inactive";
+        subscription.updated_at = nowIso();
+      }
+      logAudit("company_deactivated", "owner_management", { company_id: Number(id) });
+      persist();
+      return wait({ success: true });
+    },
+    suspendCompany: (id) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const company = db.companies.find((entry) => Number(entry.id) === Number(id));
+      if (!company) return wait({ success: false, error: "Company not found." });
+      company.status = "suspended";
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(id));
+      if (subscription) {
+        subscription.status = "inactive";
+        subscription.updated_at = nowIso();
+      }
+      logAudit("company_suspended", "owner_management", { company_id: Number(id) });
+      persist();
+      return wait({ success: true });
+    },
+    deleteCompany: (id) => rawApi.owner.deactivateCompany(id),
+    lockCompany: (id) => rawApi.owner.suspendCompany(id),
+    unlockCompany: (id) => rawApi.owner.activateCompany(id),
+    extendSubscription: (companyId, days = 30) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(companyId));
+      if (!subscription) return wait({ success: false, error: "Subscription not found." });
+      const n = Math.max(1, Number(days) || 30);
+      const base = subscription.expires_at && new Date(subscription.expires_at).getTime() > Date.now()
+        ? new Date(subscription.expires_at).getTime()
+        : Date.now();
+      subscription.expires_at = new Date(base + n * 86400000).toISOString();
+      subscription.status = "active";
+      subscription.updated_at = nowIso();
+      logAudit("subscription_extended", "subscriptions", { company_id: Number(companyId), days: n });
+      persist();
+      return wait({ success: true, expires_at: subscription.expires_at });
+    },
+    extendTrial: (companyId, days = 7) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const company = db.companies.find((entry) => Number(entry.id) === Number(companyId));
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(companyId));
+      if (!company) return wait({ success: false, error: "Company not found." });
+      const n = Math.max(1, Number(days) || 7);
+      const currentTrial = subscription?.trial_ends_at || company.trial_ends_at;
+      const base = currentTrial && new Date(currentTrial).getTime() > Date.now()
+        ? new Date(currentTrial).getTime()
+        : Date.now();
+      const trialEndsAt = new Date(base + n * 86400000).toISOString();
+      company.trial_ends_at = trialEndsAt;
+      company.status = "active";
+      if (subscription) {
+        subscription.trial_ends_at = trialEndsAt;
+        subscription.status = "trialing";
+        if (!subscription.expires_at || new Date(subscription.expires_at).getTime() < new Date(trialEndsAt).getTime()) {
+          subscription.expires_at = trialEndsAt;
+        }
+        subscription.updated_at = nowIso();
+      }
+      logAudit("trial_extended", "subscriptions", { company_id: Number(companyId), days: n, trial_ends_at: trialEndsAt });
+      persist();
+      return wait({ success: true, trial_ends_at: trialEndsAt, days: n });
+    },
+    markPaid: (companyId, payload = {}) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const company = db.companies.find((entry) => Number(entry.id) === Number(companyId));
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === Number(companyId));
+      if (!company || !subscription) return wait({ success: false, error: "Company or subscription not found." });
+      const days = Math.max(1, Number(payload.days || payload.extend_days || 30));
+      const paidUntil = payload.paid_until
+        ? new Date(payload.paid_until).toISOString()
+        : new Date(Date.now() + days * 86400000).toISOString();
+      company.status = "active";
+      if (payload.plan_code || payload.plan) {
+        const plan = db.plans.find((entry) => entry.code === (payload.plan_code || payload.plan) || entry.name === (payload.plan_code || payload.plan));
+        if (plan) {
+          subscription.plan_id = plan.id;
+          subscription.plan_code = plan.code;
+          subscription.limits = structuredClone(plan.limits);
+        }
+      }
+      subscription.status = "active";
+      subscription.expires_at = paidUntil;
+      subscription.updated_at = nowIso();
+      logAudit("mark_paid", "owner_management", { company_id: Number(companyId), paid_until: paidUntil, days });
+      persist();
+      return wait({ success: true, paid_until: paidUntil, subscription });
+    },
+    getCompanyHistory: (companyId) => {
+      const denied = requireOwner();
+      if (denied) return wait(denied);
+      const id = Number(companyId);
+      if (!id) return wait({ success: false, error: "company_id is required." });
+      const rows = db.auditLog.filter((entry) => {
+        const details = typeof entry.details === "string" ? entry.details : JSON.stringify(entry.details || {});
+        return Number(entry.company_id) === id || details.includes(`"company_id":${id}`) || details.includes(`"company_id": ${id}`);
+      }).slice(0, 200);
+      const paymentHistory = rows.filter((row) => /mark_paid|payment|billing|renew/i.test(String(row.action || "")));
+      const subscriptionHistory = rows.filter((row) =>
+        /subscription|trial_extended|mark_paid|company_activat|company_suspend|company_deactivat|extend/i.test(String(row.action || ""))
+      );
+      const subscription = db.subscriptions.find((row) => Number(row.company_id) === id) || null;
+      return wait({
+        success: true,
+        company_id: id,
+        payment_history: paymentHistory,
+        subscription_history: subscriptionHistory,
+        current_subscription: subscription,
+        audit: rows.slice(0, 100),
+      });
     },
     getActivity: (userId) => {
       const denied = requireOwner();
@@ -4935,6 +5842,42 @@ const rawApi = {
       logAudit("create_branch", "branches", { id: record.id });
       persist();
       return wait({ success: true, branch: record });
+    },
+    update: ({ id, ...updates } = {}) => {
+      const record = db.branches.find((row) => Number(row.id) === Number(id));
+      if (!record) return wait({ success: false, error: "Branch not found." });
+      if (updates.name != null) record.name = String(updates.name).trim();
+      if (updates.code != null) record.code = String(updates.code).trim().toUpperCase().slice(0, 16);
+      if (updates.address != null) record.address = String(updates.address).slice(0, 240);
+      if (updates.active != null) record.active = !(updates.active === false || updates.active === 0);
+      logAudit("update_branch", "branches", { id });
+      persist();
+      return wait({ success: true, branch: record });
+    },
+    delete: (id) => {
+      const record = db.branches.find((row) => Number(row.id) === Number(id));
+      if (!record) return wait({ success: false, error: "Branch not found.", code: "NOT_FOUND" });
+      const sameCompanyBranches = db.branches.filter((row) => String(row.company_id) === String(record.company_id));
+      if (sameCompanyBranches.length <= 1) {
+        return wait({ success: false, error: "Cannot delete the only branch for this company.", code: "LAST_BRANCH" });
+      }
+      const dependents = [
+        db.profiles?.some((p) => Number(p.branch_id) === Number(id)),
+        db.sales?.some((s) => Number(s.branch_id) === Number(id)),
+        db.purchases?.some((p) => Number(p.branch_id) === Number(id)),
+        db.products?.some((p) => Number(p.branch_id) === Number(id)),
+      ].some(Boolean);
+      if (dependents) {
+        return wait({
+          success: false,
+          error: `Cannot delete "${record.name}" — it still has linked records. Deactivate it instead, or move those records to another branch first.`,
+          code: "BRANCH_IN_USE",
+        });
+      }
+      db.branches = db.branches.filter((row) => Number(row.id) !== Number(id));
+      logAudit("delete_branch", "branches", { id, name: record.name });
+      persist();
+      return wait({ success: true });
     },
   },
   subscription: {

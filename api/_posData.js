@@ -5,13 +5,14 @@
 
 import { upsertInvoice } from "./_invoiceStore.js";
 import { excludeDemoProducts, isDemoProduct, productSku } from "./_demoProducts.js";
-import { normalizeRole } from "./_authHelpers.js";
+import { ensureUserSynced, isPlatformOwner, isUserManagerRole, normalizeRole } from "./_authHelpers.js";
 import { buildReportAnalytics } from "./_reportAnalytics.js";
 import {
   buildFxPaymentFields,
   catalogEntry,
   convertToBase,
   normalizeCode,
+  resolveMoneyProfile,
   toNumber,
 } from "./_currency.js";
 import {
@@ -23,6 +24,22 @@ import {
   PAID_PLAN_CODES,
   checkPlanLimit,
 } from "./_saasPlans.js";
+import {
+  receiveStockLot,
+  consumeStockLots,
+  registerSerials,
+  markSerialsSold,
+  upsertVariantSku,
+  listVariantSkus,
+  listSerials,
+  listOpenLots,
+} from "./_inventoryLedgers.js";
+import {
+  evaluateCompanyAccessGate,
+  handlePlatformAction,
+} from "./_platformAdmin.js";
+import { handlePayrollAction } from "./_payroll.js";
+import { notifyPaymentConfirmationSms, notifyInvoiceSms } from "./_smsService.js";
 
 /**
  * Default purchase actions when company_settings.permission_matrix omits a flag.
@@ -84,9 +101,66 @@ function denyPurchase(actionLabel) {
   };
 }
 
+/**
+ * The single multi-tenant boundary used by every list/lookup query in this
+ * file. SECURITY CRITICAL: must fail CLOSED, never open.
+ *
+ * - Tenant callers always filter by their company_id (missing → empty set).
+ * - Platform Owner may query across tenants ONLY when no companyId scope is set.
+ * - When platform is scoped/impersonating (companyId present), filter applies.
+ */
 function companyFilter(query, companyId, platform) {
-  if (platform || companyId == null || companyId === "") return query;
+  if (companyId == null || companyId === "") {
+    if (platform) return query;
+    console.warn("[companyFilter] missing company_id for a non-platform caller — returning empty result set (fail-closed)");
+    // No tenant can ever have id -1; this guarantees zero rows instead of
+    // leaking every tenant's data when company context fails to resolve.
+    return query.eq("company_id", -1);
+  }
   return query.eq("company_id", companyId);
+}
+
+/** Load one row by id, always scoped to the caller tenant (fail-closed). */
+async function fetchTenantRow(admin, table, id, companyId, platform, columns = "*") {
+  if (id == null || id === "") return null;
+  let q = admin.from(table).select(columns).eq("id", id);
+  q = companyFilter(q, companyId, platform);
+  const { data, error } = await q.maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+/** Reject cross-tenant ownership when a row was loaded without companyFilter. */
+function assertTenantOwned(row, companyId, platform, label = "Record") {
+  if (!row) return { ok: false, error: `${label} not found.` };
+  if (platform && (companyId == null || companyId === "")) return { ok: true };
+  if (companyId == null || companyId === "") {
+    return { ok: false, error: "Company context required.", code: "FORBIDDEN" };
+  }
+  if (row.company_id != null && String(row.company_id) !== String(companyId)) {
+    return { ok: false, error: "Cross-company access denied.", code: "FORBIDDEN" };
+  }
+  return { ok: true };
+}
+
+function tenantSettingsDefaults(company = null) {
+  const currency = company?.currency || "KES";
+  const catalog = catalogEntry(currency);
+  return {
+    store_name: company?.name || "",
+    store_phone: company?.phone || "",
+    store_address: company?.address || "",
+    currency,
+    currency_code: currency,
+    currency_symbol: company?.currency_symbol || catalog.symbol,
+    locale: company?.locale || catalog.locale || "en-KE",
+    country: company?.country || "Kenya",
+    country_code: company?.country_code || "",
+    base_currency_code: currency,
+    report_currency: currency,
+    enable_multi_currency: "true",
+    admin_can_edit_rates: "false",
+  };
 }
 
 /**
@@ -168,7 +242,7 @@ function isMissingTableError(error) {
 
 export async function probeSchema(admin) {
   const checks = {};
-  for (const table of [
+  const tables = [
     "branches",
     "profiles",
     "categories",
@@ -199,34 +273,70 @@ export async function probeSchema(admin) {
     "warehouses",
     "stock_movements",
     "invoice_verifications",
-  ]) {
-    const { error } = await admin.from(table).select("*").limit(1);
-    checks[table] = error
-      ? { ok: false, code: error.code || null, missing: isMissingTableError(error), message: String(error.message || "").slice(0, 160) }
-      : { ok: true };
-  }
-  const { error: rpcError } = await admin.rpc("pos_create_sale", { payload: { items: [] } });
-  if (!rpcError) {
-    checks.pos_create_sale = { ok: true };
-  } else {
-    const msg = String(rpcError.message || "");
-    const missing =
-      rpcError.code === "PGRST202" ||
-      /Could not find the function/i.test(msg) ||
-      /function .*pos_create_sale/i.test(msg);
-    // Empty-items / invalid_parameter validation means the RPC exists (Postgres 22023).
-    const existsViaValidation =
-      rpcError.code === "22023" ||
-      /sale requires items|company_id required|invalid input|payload/i.test(msg);
+  ];
+
+  // Parallel probes — sequential awaits previously kept /api/pos Pending for tens of seconds.
+  const tableSettled = await Promise.all(
+    tables.map(async (table) => {
+      try {
+        const { error } = await admin.from(table).select("id").limit(1);
+        return [
+          table,
+          error
+            ? {
+                ok: false,
+                code: error.code || null,
+                missing: isMissingTableError(error),
+                message: String(error.message || "").slice(0, 160),
+              }
+            : { ok: true },
+        ];
+      } catch (err) {
+        return [
+          table,
+          {
+            ok: false,
+            code: err?.code || null,
+            missing: false,
+            message: String(err?.message || err || "").slice(0, 160),
+          },
+        ];
+      }
+    })
+  );
+  for (const [table, result] of tableSettled) checks[table] = result;
+
+  try {
+    const { error: rpcError } = await admin.rpc("pos_create_sale", { payload: { items: [] } });
+    if (!rpcError) {
+      checks.pos_create_sale = { ok: true };
+    } else {
+      const msg = String(rpcError.message || "");
+      const missing =
+        rpcError.code === "PGRST202" ||
+        /Could not find the function/i.test(msg) ||
+        /function .*pos_create_sale/i.test(msg);
+      // Empty-items / invalid_parameter validation means the RPC exists (Postgres 22023).
+      const existsViaValidation =
+        rpcError.code === "22023" ||
+        /sale requires items|company_id required|invalid input|payload/i.test(msg);
+      checks.pos_create_sale = {
+        ok: existsViaValidation || !missing,
+        missing,
+        code: rpcError.code || null,
+      };
+    }
+  } catch (err) {
     checks.pos_create_sale = {
-      ok: existsViaValidation || !missing,
-      missing,
-      code: rpcError.code || null,
+      ok: false,
+      missing: true,
+      code: err?.code || null,
+      message: String(err?.message || err || "").slice(0, 160),
     };
   }
 
   // Purchase workflow columns (migration 007 + 009)
-  for (const [key, table, cols] of [
+  const columnProbes = [
     ["products_sku_tax_rate", "products", "id,sku,tax_rate"],
     ["suppliers_tax_notes", "suppliers", "id,tax_number,notes"],
     ["suppliers_enterprise", "suppliers", "id,code,payment_terms,credit_limit,total_paid,last_purchase_at,last_payment_at"],
@@ -234,30 +344,51 @@ export async function probeSchema(admin) {
     ["purchases_enterprise", "purchases", "id,amount_paid,balance,notes,attachment_url,client_reference"],
     ["purchase_items_receive", "purchase_items", "id,qty_ordered,qty_received,discount,tax"],
     ["products_inventory_enterprise", "products", "id,archived_at,deleted_at,wholesale_price,max_stock,expiry_date,stock_preference"],
+    ["products_min_selling_price", "products", "id,min_selling_price"],
     ["stock_movements_batch", "stock_movements", "id,batch_number,expiry_date,warehouse_id"],
     ["stock_transfers_warehouse", "stock_transfers", "id,from_warehouse_id,to_warehouse_id,status"],
-  ]) {
-    const { error } = await admin.from(table).select(cols).limit(1);
-    checks[key] = error
-      ? { ok: false, code: error.code || null, missing: isMissingColumnError(error), message: String(error.message || "").slice(0, 160) }
-      : { ok: true };
-  }
-  {
-    const { error } = await admin.from("purchase_payments").select("id").limit(1);
-    checks.purchase_payments = error
-      ? { ok: false, code: error.code || null, missing: isMissingTableError(error), message: String(error.message || "").slice(0, 160) }
-      : { ok: true };
-  }
+    ["purchase_payments", "purchase_payments", "id"],
+  ];
+  const columnSettled = await Promise.all(
+    columnProbes.map(async ([key, table, cols]) => {
+      try {
+        const { error } = await admin.from(table).select(cols).limit(1);
+        return [
+          key,
+          error
+            ? {
+                ok: false,
+                code: error.code || null,
+                missing: isMissingColumnError(error) || isMissingTableError(error),
+                message: String(error.message || "").slice(0, 160),
+              }
+            : { ok: true },
+        ];
+      } catch (err) {
+        return [
+          key,
+          {
+            ok: false,
+            code: err?.code || null,
+            missing: false,
+            message: String(err?.message || err || "").slice(0, 160),
+          },
+        ];
+      }
+    })
+  );
+  for (const [key, result] of columnSettled) checks[key] = result;
+
   return checks;
 }
 
 /** Slim column sets for list endpoints — avoid select("*") payload bloat. */
 const LIST_COLUMNS = Object.freeze({
   products:
-    "id,name,sku,barcode,category_id,brand_id,unit_id,unit,price,cost,wholesale_price,discount_percent,tax_inclusive,stock,reorder_level,max_stock,tax_rate,active,image_url,company_id,branch_id,variants,brand,track_batches,default_expiry_days,expiry_date,stock_preference,archived_at,deleted_at,last_cost,avg_cost,created_at",
+    "id,name,sku,barcode,category_id,brand_id,unit_id,unit,price,cost,wholesale_price,min_selling_price,discount_percent,tax_inclusive,stock,reorder_level,max_stock,tax_rate,active,image_url,company_id,branch_id,variants,brand,track_batches,default_expiry_days,expiry_date,stock_preference,archived_at,deleted_at,last_cost,avg_cost,created_at",
   customers: "id,name,phone,email,points,visits,spent,credit_limit,balance,company_id,created_at",
   suppliers:
-    "id,code,name,contact_person,phone,email,address,tax_number,status,payment_terms,credit_limit,opening_balance,total_ordered,total_paid,balance,last_purchase_at,last_payment_at,notes,order_count,company_id,created_at,archived_at,deleted_at",
+    "id,code,name,contact_person,phone,email,address,tax_number,status,payment_terms,credit_limit,opening_balance,opening_debit,opening_credit,total_ordered,total_paid,balance,last_purchase_at,last_payment_at,notes,order_count,company_id,created_at,archived_at,deleted_at",
   purchases:
     "id,po_number,invoice_no,invoice_date,supplier_id,status,total,subtotal,tax_total,discount_total,shipping,other_charges,amount_paid,balance,due_date,payment_due_date,payment_terms,created_at,updated_at,item_count,notes,attachment_url,items_json,company_id,branch_id,warehouse_id,received_at,ordered_at,cancelled_at,rejected_at,rejection_reason,approved_at,approved_by,created_by,currency_code",
   expenses:
@@ -269,7 +400,7 @@ const LIST_COLUMNS = Object.freeze({
   sale_items: "id,sale_id,product_id,name,qty,price,cost",
   brands: "id,name,company_id,created_at",
   units: "id,name,abbreviation,company_id,created_at",
-  warehouses: "id,name,code,branch_id,address,company_id,active,created_at",
+  warehouses: "id,name,code,branch_id,address,company_id,active,created_at,is_main",
   audit_log: "id,action,module,user_name,details,ip,created_at,company_id,user_id",
 });
 
@@ -340,11 +471,7 @@ async function listScoped(admin, table, caller, columns = "*", options = {}) {
       }
       const again = await retry;
       if (again.error) {
-        if (isMissingColumnError(again.error) && caller.company_id != null) {
-          const unscoped = await admin.from(table).select("*").order(orderBy, { ascending }).limit(options.softCap || DEFAULT_LIST_CAP);
-          if (unscoped.error) throw unscoped.error;
-          return unscoped.data || [];
-        }
+        // Never fall back to an unscoped select — that leaks cross-tenant rows.
         throw again.error;
       }
       return again.data || [];
@@ -359,11 +486,7 @@ async function countScoped(admin, table, caller) {
   q = companyFilter(q, caller.company_id, caller.role === "platform_owner");
   const { count, error } = await q;
   if (error) {
-    if (isMissingColumnError(error) && caller.company_id != null) {
-      const retry = await admin.from(table).select("id", { count: "exact", head: true });
-      if (retry.error) throw retry.error;
-      return retry.count || 0;
-    }
+    // Never count unscoped rows when company_id filter fails.
     throw error;
   }
   return count || 0;
@@ -410,6 +533,7 @@ function normalizeProduct(row, categories = []) {
     price: num(row.price),
     cost: num(row.cost),
     wholesale_price: num(row.wholesale_price),
+    min_selling_price: num(row.min_selling_price),
     discount_percent: num(row.discount_percent),
     tax_inclusive: row.tax_inclusive === true || row.tax_inclusive === 1,
     reorder_level: reorder,
@@ -424,7 +548,10 @@ function normalizeProduct(row, categories = []) {
     deleted_at: row.deleted_at || null,
     stock_status,
     expiry_status,
-    stock_value: stock * num(row.cost),
+    // Enterprise costing: value inventory at average cost when known, falling back
+    // to the last recorded cost — never at selling price (would overstate assets).
+    stock_value: stock * num(row.avg_cost != null ? row.avg_cost : row.cost),
+    profit_margin: num(row.price) > 0 ? ((num(row.price) - num(row.cost)) / num(row.price)) * 100 : 0,
     active: row.active === false || row.active === 0 || row.archived_at || row.deleted_at ? 0 : 1,
   };
 }
@@ -439,7 +566,7 @@ function filterActiveProducts(rows, params = {}) {
   });
 }
 
-async function applyProductStockDelta(admin, { companyId, caller, product, delta, note, type, warehouse_id, batch_number, expiry_date, variant_id, reference_type, reference_id }) {
+async function applyProductStockDelta(admin, { companyId, caller, product, delta, note, type, warehouse_id, batch_number, expiry_date, variant_id, reference_type, reference_id, serials }) {
   const id = Number(product.id);
   const next = Math.max(0, num(product.stock) + num(delta));
   const { data, error: updError } = await admin
@@ -490,11 +617,190 @@ async function applyProductStockDelta(admin, { companyId, caller, product, delta
         user_name: caller.name,
       }));
     }
+    // Keep per-warehouse ledger in sync when table exists (migration 018).
+    await applyWarehouseStockDelta(admin, {
+      companyId,
+      warehouseId: warehouse_id,
+      productId: id,
+      delta: num(delta),
+      batch_number,
+      expiry_date,
+    });
+    // FIFO/FEFO lots + optional serials (migration 019)
+    const dlt = num(delta);
+    if (dlt > 0) {
+      const lot = await receiveStockLot(admin, {
+        companyId,
+        productId: id,
+        variantId: variant_id || null,
+        warehouseId: warehouse_id || null,
+        qty: dlt,
+        unitCost: num(product.avg_cost || product.cost || product.last_cost),
+        batchNumber: batch_number || null,
+        expiryDate: expiry_date || null,
+        referenceType: reference_type || type || "in",
+        referenceId: reference_id || null,
+      });
+      if (lot?.id && Array.isArray(serials) && serials.length) {
+        await registerSerials(admin, {
+          companyId,
+          productId: id,
+          variantId: variant_id || null,
+          warehouseId: warehouse_id || null,
+          lotId: lot.id,
+          serials,
+        });
+      }
+    } else if (dlt < 0) {
+      const pref = String(product.stock_preference || "fifo").toLowerCase();
+      await consumeStockLots(admin, {
+        companyId,
+        productId: id,
+        variantId: variant_id || null,
+        warehouseId: warehouse_id || null,
+        qty: Math.abs(dlt),
+        preference: pref === "fefo" ? "fefo" : "fifo",
+        referenceType: reference_type || type || "out",
+        referenceId: reference_id || null,
+        caller,
+      });
+      if (Array.isArray(serials) && serials.length) {
+        await markSerialsSold(admin, {
+          companyId,
+          serials,
+          saleId: reference_type === "sale" ? reference_id : null,
+        });
+      }
+    }
   }
   if (expiry_date && companyId != null) {
     await quietSb(admin.from("products").update({ expiry_date }).eq("id", id));
   }
   return normalizeProduct(data || { ...product, stock: next });
+}
+
+/**
+ * Enterprise Warehouse Management: resolves the single "Main Store" — the
+ * central warehouse that receives every approved purchase. Self-heals (promotes
+ * the oldest warehouse if none is flagged `is_main`) and auto-provisions a
+ * "Main Store" warehouse if the company has none at all. Prefers the atomic
+ * DB function (migration 027) and falls back to equivalent JS logic so this
+ * keeps working even before that migration has been applied.
+ */
+async function resolveMainWarehouseId(admin, companyId) {
+  if (companyId == null) return null;
+
+  try {
+    const { data, error } = await admin.rpc("resolve_main_warehouse_id", { p_company_id: companyId });
+    if (!error && data != null) return Number(data);
+  } catch (_) {
+    // fall through to JS fallback below
+  }
+
+  try {
+    let q = admin
+      .from("warehouses")
+      .select("id")
+      .eq("company_id", companyId)
+      .eq("is_main", true)
+      .order("id", { ascending: true })
+      .limit(1);
+    let { data, error } = await q;
+    if (error && isMissingColumnError(error)) {
+      // Pre-migration: no is_main column yet — behave like the legacy primary lookup.
+      let legacyQ = admin.from("warehouses").select("id").eq("company_id", companyId).order("id", { ascending: true }).limit(1);
+      const { data: legacyData, error: legacyErr } = await legacyQ;
+      if (legacyErr) return isMissingTableError(legacyErr) ? null : null;
+      const legacyRow = Array.isArray(legacyData) ? legacyData[0] : legacyData;
+      return legacyRow?.id != null ? Number(legacyRow.id) : null;
+    }
+    if (error) return isMissingTableError(error) ? null : null;
+    let row = Array.isArray(data) ? data[0] : data;
+    if (row?.id != null) return Number(row.id);
+
+    // No warehouse flagged main — self-heal by promoting the oldest one.
+    const { data: oldest } = await admin
+      .from("warehouses")
+      .select("id")
+      .eq("company_id", companyId)
+      .order("id", { ascending: true })
+      .limit(1);
+    const oldestRow = Array.isArray(oldest) ? oldest[0] : oldest;
+    if (oldestRow?.id != null) {
+      await quietSb(admin.from("warehouses").update({ is_main: true }).eq("id", oldestRow.id));
+      return Number(oldestRow.id);
+    }
+
+    // Company has no warehouse at all — auto-provision the Main Store.
+    const { data: created, error: createErr } = await admin
+      .from("warehouses")
+      .insert({ company_id: companyId, name: "Main Store", code: "MAIN", is_main: true, active: true })
+      .select("id")
+      .single();
+    if (!createErr && created?.id != null) return Number(created.id);
+  } catch (_) {
+    // best-effort — fall through to null below
+  }
+  return null;
+}
+
+/** Additive warehouse_stock ledger (018). No-op if table missing. */
+async function applyWarehouseStockDelta(admin, { companyId, warehouseId, productId, delta, batch_number, expiry_date }) {
+  if (companyId == null || productId == null || !num(delta)) return;
+  let whId = warehouseId != null ? Number(warehouseId) : null;
+  if (!whId) whId = await resolveMainWarehouseId(admin, companyId);
+  if (!whId) return;
+
+  const { data: row, error } = await admin
+    .from("warehouse_stock")
+    .select("*")
+    .eq("company_id", companyId)
+    .eq("warehouse_id", whId)
+    .eq("product_id", productId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingTableError(error)) return;
+    throw error;
+  }
+  const next = Math.max(0, num(row?.qty) + num(delta));
+  if (row?.id) {
+    const { error: updErr } = await admin
+      .from("warehouse_stock")
+      .update({
+        qty: next,
+        batch_number: batch_number != null && batch_number !== "" ? batch_number : row.batch_number,
+        expiry_date: expiry_date || row.expiry_date || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", row.id);
+    if (updErr && !isMissingTableError(updErr)) throw updErr;
+  } else if (next > 0) {
+    const { error: insErr } = await admin.from("warehouse_stock").insert({
+      company_id: companyId,
+      warehouse_id: whId,
+      product_id: productId,
+      qty: next,
+      batch_number: batch_number || null,
+      expiry_date: expiry_date || null,
+      updated_at: new Date().toISOString(),
+    });
+    if (insErr && !isMissingTableError(insErr) && insErr.code !== "23505") throw insErr;
+  }
+}
+
+async function readWarehouseStockQty(admin, companyId, warehouseId, productId) {
+  const { data, error } = await admin
+    .from("warehouse_stock")
+    .select("qty")
+    .eq("company_id", companyId)
+    .eq("warehouse_id", warehouseId)
+    .eq("product_id", productId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingTableError(error)) return null;
+    throw error;
+  }
+  return data ? num(data.qty) : 0;
 }
 
 function autoSku(name) {
@@ -523,20 +829,34 @@ function linePurchaseTotal(item) {
 const PURCHASE_STATUSES = new Set([
   "Draft",
   "Pending",
+  "PendingApproval",
   "Ordered",
+  "Approved",
   "PartiallyReceived",
   "Received",
   "Cancelled",
   "Rejected",
 ]);
 
+/** Statuses that book AP / may hold posted inventory. */
+const PURCHASE_POSTED_STATUSES = new Set(["Approved", "Ordered", "Received", "PartiallyReceived"]);
+
 function normalizePurchaseStatus(status, fallback = "Pending") {
   const s = String(status || fallback).trim();
-  // UI aliases → DB enums
-  if (s === "Approved" || s === "Approve") return "Ordered";
+  // UI aliases → DB enums (Approved is first-class; Ordered kept as legacy synonym)
+  if (s === "Pending Approval" || s === "PendingApproval") return "Pending";
+  if (s === "Approve") return "Approved";
   if (s === "Reject") return "Rejected";
-  if (PURCHASE_STATUSES.has(s)) return s;
+  if (s === "Ordered") return "Approved";
+  if (PURCHASE_STATUSES.has(s)) return s === "PendingApproval" ? "Pending" : s;
   return fallback;
+}
+
+function purchaseStatusLabel(status) {
+  const s = String(status || "");
+  if (s === "Pending") return "Pending Approval";
+  if (s === "Ordered") return "Approved";
+  return s;
 }
 
 function computePurchaseHeaderTotals(items, extras = {}) {
@@ -658,22 +978,104 @@ function deriveReceiveStatus(items) {
   return null;
 }
 
-async function bumpSupplierPaymentMeta(admin, supplierId, amount, companyId) {
-  const { data: supplier } = await admin.from("suppliers").select("*").eq("id", supplierId).maybeSingle();
-  if (!supplier) return null;
-  const updates = {
-    balance: Math.max(0, num(supplier.balance) - amount),
-    total_paid: num(supplier.total_paid) + amount,
-    last_payment_at: new Date().toISOString(),
-  };
-  let { error } = await admin.from("suppliers").update(updates).eq("id", supplierId);
-  if (error && isMissingColumnError(error)) {
-    ({ error } = await admin
+// Enterprise AP: Outstanding =
+//   Opening Debit - Opening Credit + Purchases - Payments - Credit Notes
+// Ledger view only includes Approved/Received purchases (migration 026).
+async function recomputeSupplierBalance(admin, supplierId, companyId) {
+  const id = Number(supplierId);
+  if (!id) return null;
+  try {
+    const { data: supplier } = await admin
       .from("suppliers")
-      .update({ balance: updates.balance })
-      .eq("id", supplierId));
+      .select("id,opening_balance,opening_debit,opening_credit")
+      .eq("id", id)
+      .maybeSingle();
+    if (!supplier) return null;
+
+    const { data: entries, error } = await admin
+      .from("supplier_ledger_v")
+      .select("entry_type,debit,credit")
+      .eq("supplier_id", id);
+    if (error) return null; // view not migrated yet — leave balance as-is (graceful degrade)
+
+    let debitSum = 0;
+    let creditSum = 0;
+    let purchaseTotal = 0;
+    let paidTotal = 0;
+    let creditNotes = 0;
+    let orderCount = 0;
+    for (const e of entries || []) {
+      const d = num(e.debit);
+      const c = num(e.credit);
+      debitSum += d;
+      creditSum += c;
+      if (e.entry_type === "purchase") {
+        purchaseTotal += d;
+        orderCount += 1;
+      } else if (e.entry_type === "payment") {
+        paidTotal += c;
+      } else if (e.entry_type === "purchase_return" || e.entry_type === "credit_note") {
+        creditNotes += c;
+      }
+    }
+
+    const openingDebit = num(
+      supplier.opening_debit != null ? supplier.opening_debit : supplier.opening_balance
+    );
+    const openingCredit = num(supplier.opening_credit);
+    // Opening Debit − Opening Credit + ledger debits − ledger credits
+    // (ledger only books Approved/Received purchases; payments & credit notes credit AP)
+    const balance = openingDebit - openingCredit + debitSum - creditSum;
+    const updates = {
+      balance,
+      total_ordered: purchaseTotal,
+      total_paid: paidTotal,
+      order_count: orderCount,
+      opening_balance: openingDebit - openingCredit,
+    };
+
+    let { error: updErr } = await admin.from("suppliers").update(updates).eq("id", id);
+    if (updErr && isMissingColumnError(updErr)) {
+      const slim = { balance, total_ordered: purchaseTotal, total_paid: paidTotal, order_count: orderCount };
+      ({ error: updErr } = await admin.from("suppliers").update(slim).eq("id", id));
+      if (updErr && isMissingColumnError(updErr)) {
+        ({ error: updErr } = await admin.from("suppliers").update({ balance }).eq("id", id));
+      }
+    }
+    return {
+      ...updates,
+      opening_debit: openingDebit,
+      opening_credit: openingCredit,
+      total_purchases: purchaseTotal,
+      total_payments: paidTotal,
+      credit_notes: creditNotes,
+      outstanding_balance: balance,
+      current_balance: balance,
+    };
+  } catch {
+    return null;
   }
-  return updates;
+}
+
+function mapSupplierAccounting(s) {
+  const openingDebit = num(s.opening_debit != null ? s.opening_debit : s.opening_balance);
+  const openingCredit = num(s.opening_credit);
+  const balance = num(s.balance);
+  const totalPurchases = num(s.total_ordered);
+  const totalPayments = num(s.total_paid);
+  return {
+    ...s,
+    opening_debit: openingDebit,
+    opening_credit: openingCredit,
+    opening_balance: openingDebit - openingCredit,
+    current_balance: balance,
+    total_purchases: totalPurchases,
+    total_payments: totalPayments,
+    outstanding_balance: balance,
+    total_ordered: totalPurchases,
+    total_paid: totalPayments,
+    balance,
+  };
 }
 
 async function writeAudit(admin, { companyId, caller, action, module, details }) {
@@ -811,12 +1213,74 @@ export async function handlePosAction(admin, caller, action, params = {}) {
   const platform = caller.role === "platform_owner";
   const companyId = platform ? params.company_id ?? caller.company_id : caller.company_id;
 
+  // Platform Owner console — must run before tenant-scoped switches.
+  if (String(action || "").startsWith("platform.") || String(action || "").startsWith("owner.")) {
+    const platformResult = await handlePlatformAction(admin, caller, action, params);
+    if (platformResult != null) return platformResult;
+  }
+
+  // Company Payroll & HR (migration 020)
+  if (String(action || "").startsWith("payroll.")) {
+    const payrollResult = await handlePayrollAction(admin, caller, action, params);
+    if (payrollResult != null) return payrollResult;
+  }
+
   switch (action) {
-    case "health.probe":
-      return { success: true, checks: await probeSchema(admin) };
+    case "health.probe": {
+      // Public monitors get a minimal ok signal only. Schema/AI details require auth + owner role.
+      const authenticated = Boolean(caller?.id);
+      const privileged = authenticated && (isPlatformOwner(caller.role) || normalizeRole(caller.role) === "owner");
+      if (!privileged) {
+        return { success: true, ok: true };
+      }
+      const aiMeta = {
+        configured: Boolean(
+          String(
+            process.env.OPENAI_API_KEY ||
+              process.env.NEXORA_AI_API_KEY ||
+              process.env.AI_API_KEY ||
+              ""
+          ).trim()
+        ),
+        model: String(process.env.OPENAI_MODEL || process.env.NEXORA_AI_MODEL || "gpt-4o-mini").trim(),
+      };
+      try {
+        const checks = await Promise.race([
+          probeSchema(admin),
+          new Promise((_, reject) => {
+            const timer = setTimeout(() => {
+              const err = new Error("Schema probe timed out.");
+              err.code = "TIMEOUT";
+              reject(err);
+            }, 20_000);
+            void timer;
+          }),
+        ]);
+        return { success: true, checks, ai: aiMeta };
+      } catch (err) {
+        return {
+          success: true,
+          timed_out: err?.code === "TIMEOUT",
+          checks: {
+            probe: {
+              ok: false,
+              code: err?.code || "PROBE_ERROR",
+              message: "Schema probe failed.",
+            },
+          },
+          ai: { configured: aiMeta.configured },
+        };
+      }
+    }
 
     case "companies.getById": {
       const id = params.id ?? companyId;
+      if (id == null || id === "") {
+        return { success: false, error: "Company id is required.", code: "FORBIDDEN" };
+      }
+      if (!platform && String(id) !== String(caller.company_id)) {
+        return { success: false, error: "Cross-company access denied.", code: "FORBIDDEN" };
+      }
       const { data, error } = await admin.from("companies").select("*").eq("id", id).maybeSingle();
       if (error) {
         if (isMissingTableError(error)) {
@@ -836,44 +1300,113 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     case "companies.hydrate": {
       const id = Number(params.company_id);
       if (!id) return { success: false, error: "company_id required." };
+      const role = normalizeRole(caller.role);
+      if (!platform) {
+        if (caller.company_id == null || String(caller.company_id) !== String(id)) {
+          return { success: false, error: "You can only hydrate your own company.", code: "FORBIDDEN" };
+        }
+        if (!isUserManagerRole(role)) {
+          return { success: false, error: "Insufficient permissions to update company workspace.", code: "FORBIDDEN" };
+        }
+      }
+      const ownerUserId = platform
+        ? (params.supabase_user_id || null)
+        : (caller.id || params.supabase_user_id || null);
+      if (!platform && params.supabase_user_id && String(params.supabase_user_id) !== String(caller.id)) {
+        return { success: false, error: "Cannot assign ownership to another user.", code: "FORBIDDEN" };
+      }
       const row = {
         id,
         name: String(params.company_name || "Company").slice(0, 120),
         code: String(params.company_code || `CO${id}`).toUpperCase().slice(0, 32),
-        currency: String(params.currency || "KES"),
+        country: String(params.country || "Kenya").slice(0, 80),
+        currency: String(params.currency || params.currency_code || "KES"),
+        currency_symbol: String(params.currency_symbol || catalogEntry(params.currency || params.currency_code || "KES").symbol),
+        locale: String(params.locale || catalogEntry(params.currency || params.currency_code || "KES").locale || "en-KE"),
         email: String(params.email || "").toLowerCase(),
         phone: String(params.phone || ""),
         status: params.email_verified === false ? "pending_verification" : "active",
-        owner_user_id: params.supabase_user_id || null,
+        owner_user_id: ownerUserId,
         plan_code: String(params.plan_code || "free_trial"),
         trial_ends_at: params.trial_ends_at || null,
       };
-      const { error } = await admin.from("companies").upsert(row, { onConflict: "id" });
+      let { error } = await admin.from("companies").upsert(row, { onConflict: "id" });
+      if (error && /currency_symbol|locale/i.test(error.message || "")) {
+        delete row.currency_symbol;
+        delete row.locale;
+        ({ error } = await admin.from("companies").upsert(row, { onConflict: "id" }));
+      }
       if (error && !isMissingTableError(error)) throw error;
 
-      if (params.branch_id != null) {
-        await admin.from("branches").upsert(
-          {
-            id: Number(params.branch_id),
-            company_id: id,
-            name: "Main Branch",
-            code: "MAIN",
-            active: true,
-          },
-          { onConflict: "id" }
-        );
+      // Never upsert branches by global PK — that can reassign Super Owner branch 1
+      // (or any other tenant's branch) to the caller's company. Only ensure a Main
+      // Branch exists for THIS company_id.
+      let ensuredBranchId = null;
+      try {
+        const requestedBranchId =
+          params.branch_id != null && params.branch_id !== "" ? Number(params.branch_id) : null;
+        if (requestedBranchId) {
+          const { data: ownedBranch } = await admin
+            .from("branches")
+            .select("id, company_id")
+            .eq("id", requestedBranchId)
+            .eq("company_id", id)
+            .maybeSingle();
+          if (ownedBranch) ensuredBranchId = ownedBranch.id;
+        }
+        if (!ensuredBranchId) {
+          const { data: mainBranch } = await admin
+            .from("branches")
+            .select("id")
+            .eq("company_id", id)
+            .eq("code", "MAIN")
+            .maybeSingle();
+          if (mainBranch?.id) {
+            ensuredBranchId = mainBranch.id;
+          } else {
+            const { data: createdBranch } = await admin
+              .from("branches")
+              .insert({ company_id: id, name: "Main Branch", code: "MAIN", active: true })
+              .select("id")
+              .maybeSingle();
+            ensuredBranchId = createdBranch?.id || null;
+          }
+        }
+      } catch {
+        /* optional until branches table exists */
       }
 
       try {
+        const { data: existingSettings } = await admin
+          .from("company_settings")
+          .select("settings")
+          .eq("company_id", id)
+          .maybeSingle();
+        const merged = {
+          ...(existingSettings?.settings && typeof existingSettings.settings === "object"
+            ? existingSettings.settings
+            : {}),
+          store_name: row.name,
+          store_phone: row.phone,
+          currency: row.currency || BILLING_CURRENCY,
+          currency_code: row.currency || BILLING_CURRENCY,
+          currency_symbol: row.currency_symbol || catalogEntry(row.currency || BILLING_CURRENCY).symbol,
+          locale: row.locale || "en-KE",
+          country: row.country || "Kenya",
+          base_currency_code: row.currency || BILLING_CURRENCY,
+          report_currency: row.currency || BILLING_CURRENCY,
+        };
+        if (ensuredBranchId != null) {
+          merged.default_branch_id = String(ensuredBranchId);
+        } else if (merged.default_branch_id === "1" || merged.default_branch_id === 1) {
+          // Never keep a Super Owner branch default on a non-company-1 tenant.
+          delete merged.default_branch_id;
+        }
         await admin.from("company_settings").upsert(
           {
             company_id: id,
-            settings: {
-              store_name: row.name,
-              store_phone: row.phone,
-              currency: row.currency || BILLING_CURRENCY,
-              default_branch_id: String(params.branch_id || 1),
-            },
+            settings: merged,
+            updated_at: new Date().toISOString(),
           },
           { onConflict: "company_id" }
         );
@@ -900,11 +1433,41 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         /* optional */
       }
 
-      return { success: true, company_id: id, branch_id: params.branch_id || 1, hydrated: true };
+      return { success: true, company_id: id, branch_id: ensuredBranchId, hydrated: true };
+    }
+
+    case "companies.activateForOwner": {
+      const ownerId = String(params.owner_user_id || caller.id || "").trim();
+      if (!ownerId) return { success: false, error: "owner_user_id required." };
+      if (!platform && String(caller.id) !== ownerId) {
+        return { success: false, error: "You can only activate your own company.", code: "FORBIDDEN" };
+      }
+      const { data, error } = await admin
+        .from("companies")
+        .update({ status: "active" })
+        .eq("owner_user_id", ownerId)
+        .eq("status", "pending_verification")
+        .select("id, status")
+        .maybeSingle();
+      if (error && !isMissingTableError(error)) throw error;
+      return { success: true, company_id: data?.id || null, status: data?.status || "active" };
     }
 
     case "companies.checkAccess": {
       const id = params.company_id ?? companyId;
+      if (!platform) {
+        if (caller.company_id == null || caller.company_id === "") {
+          return { ok: false, error: "Company context required.", code: "FORBIDDEN" };
+        }
+        if (id != null && id !== "" && String(caller.company_id) !== String(id)) {
+          return { ok: false, error: "Cross-company access denied.", code: "FORBIDDEN" };
+        }
+      }
+      // Platform-level suspend / lock / disable always wins over subscription state.
+      if (!platform && id != null && id !== "") {
+        const gate = await evaluateCompanyAccessGate(admin, id);
+        if (!gate.ok) return gate;
+      }
       const { data, error } = await admin
         .from("company_subscriptions")
         .select("*")
@@ -982,23 +1545,45 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       } catch {
         /* soft enforcement — continue if count unavailable */
       }
-      const code = String(params.code || name.slice(0, 3) || "BR")
+      const baseCode = String(params.code || name.slice(0, 3) || "BR")
         .trim()
         .toUpperCase()
-        .slice(0, 16);
+        .slice(0, 16) || "BR";
       const payload = {
         company_id: Number(targetCompanyId),
         name,
-        code,
+        code: baseCode,
         address: String(params.address || "").slice(0, 240),
         active: params.active === false || params.active === 0 ? false : true,
       };
-      let { data, error } = await admin.from("branches").insert(payload).select("*").single();
-      if (error && isMissingColumnError(error)) {
-        const slim = { company_id: payload.company_id, name: payload.name, code: payload.code, active: payload.active };
-        ({ data, error } = await admin.from("branches").insert(slim).select("*").single());
+      let data, error;
+      // `code` is unique per company (branches_company_code_uidx). Auto-derived
+      // codes (first 3 letters of the name) collide easily — e.g. "Westlands"
+      // and "Westgate" both derive "WES" — so retry with numeric suffixes
+      // instead of surfacing a raw Postgres 23505 as an opaque 500.
+      const explicitCode = Boolean(String(params.code || "").trim());
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const attemptCode = attempt === 0 ? payload.code : `${baseCode.slice(0, 14)}${attempt + 1}`.slice(0, 16);
+        ({ data, error } = await admin
+          .from("branches")
+          .insert({ ...payload, code: attemptCode })
+          .select("*")
+          .single());
+        if (!error) break;
+        if (isMissingColumnError(error)) {
+          const slim = { company_id: payload.company_id, name: payload.name, code: attemptCode, active: payload.active };
+          ({ data, error } = await admin.from("branches").insert(slim).select("*").single());
+          break;
+        }
+        if (explicitCode || error.code !== "23505") break; // only auto-retry on our own generated code
       }
-      if (error) throw error;
+      if (error) {
+        if (error.code === "23505") {
+          return { success: false, error: "A branch with that code already exists for this company. Try a different name or code.", code: "DUPLICATE_CODE" };
+        }
+        throw error;
+      }
+      await writeAudit(admin, { companyId: Number(targetCompanyId), caller, action: "create_branch", module: "branches", details: { id: data.id, name: data.name } });
       return { success: true, branch: data };
     }
 
@@ -1016,9 +1601,67 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       let q = admin.from("branches").update(updates).eq("id", id);
       q = companyFilter(q, companyId, platform);
       const { data, error } = await q.select("*").maybeSingle();
+      if (!error) {
+        await writeAudit(admin, { companyId, caller, action: "update_branch", module: "branches", details: { id } });
+      }
       if (error) throw error;
       if (!data) return { success: false, error: "Branch not found." };
       return { success: true, branch: data };
+    }
+
+    case "branches.delete": {
+      if (!["platform_owner", "owner", "super_admin", "admin"].includes(String(caller.role || ""))) {
+        return { success: false, error: "Insufficient permissions to delete a branch.", code: "FORBIDDEN" };
+      }
+      const id = Number(params.id);
+      if (!id) return { success: false, error: "Branch id is required." };
+
+      let existingQ = admin.from("branches").select("id, name, company_id").eq("id", id);
+      existingQ = companyFilter(existingQ, companyId, platform);
+      const { data: existingBranch, error: existingErr } = await existingQ.maybeSingle();
+      if (existingErr) throw existingErr;
+      if (!existingBranch) return { success: false, error: "Branch not found.", code: "NOT_FOUND" };
+
+      const branchCompanyId = existingBranch.company_id;
+      // A company must always keep at least one branch to remain operable.
+      const { count: branchCount } = await admin
+        .from("branches")
+        .select("id", { count: "exact", head: true })
+        .eq("company_id", branchCompanyId);
+      if ((branchCount || 0) <= 1) {
+        return { success: false, error: "Cannot delete the only branch for this company.", code: "LAST_BRANCH" };
+      }
+
+      // Referential integrity: never hard-delete a branch that still has
+      // dependent records — that would silently orphan users, sales,
+      // purchases, or stock. Deactivate instead in that case.
+      const dependentChecks = [
+        ["profiles", "branch_id"],
+        ["sales", "branch_id"],
+        ["purchases", "branch_id"],
+        ["products", "branch_id"],
+        ["warehouses", "branch_id"],
+      ];
+      for (const [table, column] of dependentChecks) {
+        const { count, error: countError } = await quietSb(
+          admin.from(table).select("id", { count: "exact", head: true }).eq(column, id)
+        );
+        if (countError) continue; // table/column may not exist in every deployment — skip
+        if ((count || 0) > 0) {
+          return {
+            success: false,
+            error: `Cannot delete "${existingBranch.name}" — it still has ${count} linked ${table.replace(/_/g, " ")} record(s). Deactivate it instead, or move those records to another branch first.`,
+            code: "BRANCH_IN_USE",
+          };
+        }
+      }
+
+      let delQ = admin.from("branches").delete().eq("id", id);
+      delQ = companyFilter(delQ, companyId, platform);
+      const { error: delError } = await delQ;
+      if (delError) throw delError;
+      await writeAudit(admin, { companyId: branchCompanyId, caller, action: "delete_branch", module: "branches", details: { id, name: existingBranch.name } });
+      return { success: true };
     }
 
     case "categories.getAll": {
@@ -1147,6 +1790,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     case "products.create": {
       const name = String(params.name || "").trim();
       if (!name) return { success: false, error: "Product name is required." };
+      // Enterprise pricing rule: every product must carry both a Cost Price (used by
+      // Purchases) and a Selling Price (used by Sales/POS) — never mixed or optional.
+      if (params.cost === undefined || params.cost === null || params.cost === "" || num(params.cost) < 0) {
+        return { success: false, error: "Cost Price is required and cannot be negative." };
+      }
+      if (params.price === undefined || params.price === null || params.price === "" || num(params.price) <= 0) {
+        return { success: false, error: "Selling Price is required and must be greater than zero." };
+      }
       try {
         let countQuery = admin.from("products").select("id", { count: "exact", head: true });
         countQuery = companyFilter(countQuery, companyId, platform);
@@ -1173,6 +1824,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         price: num(params.price),
         cost: num(params.cost),
         wholesale_price: num(params.wholesale_price),
+        min_selling_price: num(params.min_selling_price),
         discount_percent: num(params.discount_percent),
         tax_inclusive: params.tax_inclusive === true || params.tax_inclusive === 1,
         stock,
@@ -1238,6 +1890,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "products.update": {
+      // Enterprise pricing rule: Cost/Selling Price stay required once a product
+      // exists — reject attempts to clear them out via an update.
+      if (params.cost !== undefined && (params.cost === null || params.cost === "" || num(params.cost) < 0)) {
+        return { success: false, error: "Cost Price is required and cannot be negative." };
+      }
+      if (params.price !== undefined && (params.price === null || params.price === "" || num(params.price) <= 0)) {
+        return { success: false, error: "Selling Price is required and must be greater than zero." };
+      }
       const updates = { ...params };
       delete updates.id;
       delete updates.category;
@@ -1246,6 +1906,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       delete updates.stock_status;
       delete updates.expiry_status;
       delete updates.stock_value;
+      delete updates.profit_margin;
       if (updates.stock_preference != null) {
         const pref = String(updates.stock_preference).toLowerCase();
         updates.stock_preference = ["fifo", "fefo"].includes(pref) ? pref : "none";
@@ -1260,6 +1921,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           category_id: params.category_id,
           price: params.price,
           cost: params.cost,
+          wholesale_price: params.wholesale_price,
+          min_selling_price: params.min_selling_price,
           stock: params.stock,
           reorder_level: params.reorder_level,
           unit: params.unit,
@@ -1386,6 +2049,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             price: num(row.price),
             cost: num(row.cost),
             wholesale_price: num(row.wholesale_price),
+            min_selling_price: num(row.min_selling_price),
             discount_percent: num(row.discount_percent),
             tax_inclusive: row.tax_inclusive === true || row.tax_inclusive === "true" || row.tax_inclusive === 1,
             stock: num(row.stock),
@@ -1484,6 +2148,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         ({ data, error } = await admin.from("customers").insert(payload).select("*").single());
       }
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "create_customer", module: "customers", details: { id: data.id, name: data.name } });
       return { success: true, customer: data };
     }
 
@@ -1494,6 +2159,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       q = companyFilter(q, companyId, platform);
       const { data, error } = await q.select("*").maybeSingle();
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "update_customer", module: "customers", details: { id: params.id } });
       return { success: true, customer: data };
     }
 
@@ -1502,6 +2168,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       q = companyFilter(q, companyId, platform);
       const { error } = await q;
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "delete_customer", module: "customers", details: { id: params.id } });
       return { success: true };
     }
 
@@ -1528,6 +2195,13 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             method: params.method || "Cash",
           })
       );
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "customer_payment",
+        module: "customers",
+        details: { customer_id: customer.id, amount },
+      });
       return { success: true, balance };
     }
 
@@ -1539,17 +2213,22 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       if (!customer) return { success: false, error: "Customer not found." };
       const points = Math.max(0, num(customer.points) + num(params.delta));
       await admin.from("customers").update({ points }).eq("id", customer.id);
+      await writeAudit(admin, { companyId, caller, action: "adjust_customer_points", module: "customers", details: { customer_id: customer.id, delta: num(params.delta) } });
       return { success: true, points };
     }
 
     case "customers.getStatement": {
-      const { data: customer } = await admin.from("customers").select("*").eq("id", params.id).maybeSingle();
-      const { data: payments } = await admin
-        .from("customer_payments")
-        .select("*")
-        .eq("customer_id", params.id)
-        .order("created_at", { ascending: false });
-      return { customer, payments: payments || [] };
+      const customer = await fetchTenantRow(admin, "customers", params.id, companyId, platform);
+      if (!customer) return { customer: null, payments: [], sales: [] };
+      let salesQ = admin.from("sales").select("*").eq("customer_id", customer.id).order("created_at", { ascending: false });
+      salesQ = companyFilter(salesQ, companyId, platform);
+      let paymentsQ = admin.from("customer_payments").select("*").eq("customer_id", customer.id).order("created_at", { ascending: false });
+      paymentsQ = companyFilter(paymentsQ, companyId, platform);
+      const [{ data: payments }, { data: sales }] = await Promise.all([
+        Promise.resolve(paymentsQ).catch(() => ({ data: [] })),
+        Promise.resolve(salesQ).catch(() => ({ data: [] })),
+      ]);
+      return { customer, payments: payments || [], sales: sales || [] };
     }
 
     case "customers.getPurchaseHistory": {
@@ -1574,15 +2253,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           if (!includeArchived && (s.archived_at || s.status === "Archived")) return false;
           return true;
         })
-        .map((s) => ({
+        .map((s) => mapSupplierAccounting({
           ...s,
           code: s.code || null,
           payment_terms: s.payment_terms || null,
           credit_limit: num(s.credit_limit),
-          opening_balance: num(s.opening_balance),
-          total_paid: num(s.total_paid),
-          total_ordered: num(s.total_ordered),
-          balance: num(s.balance),
           last_purchase_at: s.last_purchase_at || null,
           last_payment_at: s.last_payment_at || null,
           archived_at: s.archived_at || null,
@@ -1592,7 +2267,13 @@ export async function handlePosAction(admin, caller, action, params = {}) {
 
     case "suppliers.create": {
       const code = params.code || (await nextSupplierCode(admin, companyId).catch(() => `SUP-${Date.now().toString().slice(-5)}`));
-      const opening = num(params.opening_balance);
+      const openingDebit = num(
+        params.opening_debit != null && params.opening_debit !== ""
+          ? params.opening_debit
+          : params.opening_balance
+      );
+      const openingCredit = num(params.opening_credit);
+      const opening = openingDebit - openingCredit;
       const explicitBalance = params.balance != null && params.balance !== "" ? num(params.balance) : null;
       const payload = {
         name: String(params.name || "").trim(),
@@ -1605,6 +2286,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         notes: params.notes || null,
         payment_terms: params.payment_terms || null,
         credit_limit: num(params.credit_limit),
+        opening_debit: openingDebit,
+        opening_credit: openingCredit,
         opening_balance: opening,
         // Legacy column — do not treat as product category; categories belong to products.
         category: params.category || null,
@@ -1631,6 +2314,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         delete slim.credit_limit;
         delete slim.total_paid;
         delete slim.opening_balance;
+        delete slim.opening_debit;
+        delete slim.opening_credit;
         delete slim.archived_at;
         delete slim.deleted_at;
         ({ data, error } = await admin.from("suppliers").insert(slim).select("*").single());
@@ -1657,6 +2342,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             payment_terms: payload.payment_terms,
             credit_limit: payload.credit_limit,
             opening_balance: payload.opening_balance,
+            opening_debit: payload.opening_debit,
+            opening_credit: payload.opening_credit,
             total_paid: payload.total_paid,
             company_id: payload.company_id,
           };
@@ -1676,9 +2363,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         caller,
         action: "create_supplier",
         module: "suppliers",
-        details: { id: data.id, name: data.name, code: data.code, opening_balance: payload.opening_balance },
+        details: {
+          id: data.id,
+          name: data.name,
+          code: data.code,
+          opening_debit: payload.opening_debit,
+          opening_credit: payload.opening_credit,
+        },
       });
-      return { success: true, id: data.id, supplier: data };
+      return { success: true, id: data.id, supplier: mapSupplierAccounting(data) };
     }
 
     case "suppliers.update": {
@@ -1687,7 +2380,20 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       // Protect computed aggregates from accidental overwrite unless explicitly sent as numbers.
       if (updates.total_paid !== undefined) updates.total_paid = num(updates.total_paid);
       if (updates.credit_limit !== undefined) updates.credit_limit = num(updates.credit_limit);
+      if (updates.opening_debit !== undefined) updates.opening_debit = num(updates.opening_debit);
+      if (updates.opening_credit !== undefined) updates.opening_credit = num(updates.opening_credit);
       if (updates.opening_balance !== undefined) updates.opening_balance = num(updates.opening_balance);
+      if (updates.opening_debit !== undefined || updates.opening_credit !== undefined) {
+        const debit = updates.opening_debit !== undefined
+          ? num(updates.opening_debit)
+          : num(params.opening_debit);
+        const credit = updates.opening_credit !== undefined
+          ? num(updates.opening_credit)
+          : num(params.opening_credit);
+        if (updates.opening_debit !== undefined || updates.opening_credit !== undefined) {
+          updates.opening_balance = debit - credit;
+        }
+      }
       if (updates.status === "Active") {
         updates.archived_at = null;
         // Do not clear deleted_at here — use restore for that.
@@ -1715,6 +2421,12 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       }
       if (error) throw error;
       if (!data) return { success: false, error: "Supplier not found." };
+      // Opening balance is the base of the AP subledger — resync the derived balance
+      // whenever it changes so the two never disagree.
+      if (updates.opening_balance !== undefined) {
+        const meta = await recomputeSupplierBalance(admin, data.id, companyId);
+        if (meta) data = { ...data, ...meta };
+      }
       await writeAudit(admin, {
         companyId,
         caller,
@@ -1863,6 +2575,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       if (supplier.deleted_at) return { success: false, error: "Cannot pay a deleted supplier. Restore it first." };
 
       const baseCode = await resolveBaseCurrencyCode(admin, companyId);
+      let linkedPurchaseBranchId = null;
+      if (params.purchase_id) {
+        const { data: linkedPurchase } = await admin
+          .from("purchases")
+          .select("branch_id")
+          .eq("id", params.purchase_id)
+          .maybeSingle();
+        linkedPurchaseBranchId = linkedPurchase?.branch_id ?? null;
+      }
       const recorded = [];
       let totalLedger = 0;
 
@@ -1887,6 +2608,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           method: split.method || "Cash",
           company_id: companyId,
           purchase_id: params.purchase_id || null,
+          branch_id: params.branch_id ? Number(params.branch_id) : linkedPurchaseBranchId,
           reference: split.reference || null,
           notes: split.notes || null,
           payment_currency: fx.payment_currency,
@@ -1928,7 +2650,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         recorded.push({ ...(payData || {}), ...fx, method: split.method || "Cash" });
       }
 
-      const meta = await bumpSupplierPaymentMeta(admin, supplier.id, totalLedger, companyId);
+      const meta = await recomputeSupplierBalance(admin, supplier.id, companyId);
+      await quietSb(admin.from("suppliers").update({ last_payment_at: new Date().toISOString() }).eq("id", supplier.id));
 
       await writeAudit(admin, {
         companyId,
@@ -1970,47 +2693,117 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       pq = companyFilter(pq, companyId, platform);
       const { data: purchases } = await pq;
 
-      let ledger = [];
+      let allEntries = [];
       const { data: ledgerRows, error: ledgerErr } = await admin
         .from("supplier_ledger_v")
         .select("*")
         .eq("supplier_id", params.id)
-        .order("entry_date", { ascending: false });
+        .order("entry_date", { ascending: true });
       if (!ledgerErr && ledgerRows) {
-        ledger = ledgerRows;
+        allEntries = ledgerRows;
       } else {
         // Fallback derive when view not migrated yet
-        ledger = [
+        allEntries = [
           ...(purchases || [])
-            .filter((p) => !["Cancelled", "Draft"].includes(String(p.status)))
+            .filter((p) => PURCHASE_POSTED_STATUSES.has(String(p.status)))
             .map((p) => ({
-              entry_date: p.created_at,
+              entry_date: p.approved_at || p.ordered_at || p.created_at,
               entry_type: "purchase",
               reference: p.po_number || p.invoice_no,
               description: `Purchase ${p.po_number || p.id} (${p.status})`,
               debit: num(p.total),
               credit: 0,
+              branch_id: p.branch_id ?? null,
               source_table: "purchases",
               source_id: p.id,
             })),
           ...(payments || []).map((p) => ({
             entry_date: p.created_at,
-            entry_type: "supplier_payment",
-            reference: p.method,
-            description: `Supplier payment via ${p.method || "Cash"}`,
+            entry_type: "payment",
+            reference: p.reference || p.method,
+            description: `Payment via ${p.method || "Cash"}`,
             debit: 0,
             credit: num(p.amount),
+            branch_id: p.branch_id ?? null,
             source_table: "supplier_payments",
             source_id: p.id,
           })),
-        ].sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date)));
+        ].sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)));
       }
+
+      const branchFilter = params.branch_id != null && params.branch_id !== "" ? Number(params.branch_id) : null;
+      if (branchFilter) {
+        allEntries = allEntries.filter((e) => Number(e.branch_id) === branchFilter);
+      }
+
+      const startDate = params.start_date ? String(params.start_date).slice(0, 10) : null;
+      const endDate = params.end_date ? String(params.end_date).slice(0, 10) : null;
+      const dayKey = (value) => String(value || "").slice(0, 10);
+
+      // Walk chronologically once so the running balance reflects everything before the
+      // visible window, then slice the entries actually shown in the statement.
+      let running = num(supplier.opening_debit != null ? supplier.opening_debit : supplier.opening_balance)
+        - num(supplier.opening_credit);
+      let openingBalanceForRange = running;
+      const withRunning = [];
+      for (const entry of allEntries) {
+        const entryDay = dayKey(entry.entry_date);
+        const beforeRange = startDate && entryDay < startDate;
+        running += num(entry.debit) - num(entry.credit);
+        if (beforeRange) {
+          openingBalanceForRange = running;
+          continue;
+        }
+        if (endDate && entryDay > endDate) continue;
+        withRunning.push({ ...entry, running_balance: running });
+      }
+
+      const inRange = (entry) => {
+        const entryDay = dayKey(entry.entry_date);
+        if (startDate && entryDay < startDate) return false;
+        if (endDate && entryDay > endDate) return false;
+        return true;
+      };
+      const totals = allEntries.filter(inRange).reduce(
+        (acc, e) => {
+          const type = String(e.entry_type || "");
+          if (type === "purchase") acc.total_purchases += num(e.debit);
+          else if (type === "payment") acc.total_payments += num(e.credit);
+          else if (type === "purchase_return") acc.total_returns += num(e.credit);
+          else if (type === "debit_note") acc.total_debit_notes += num(e.debit);
+          else if (type === "credit_note") acc.total_credit_notes += num(e.credit);
+          else if (type === "adjustment") acc.total_adjustments += num(e.debit) - num(e.credit);
+          return acc;
+        },
+        {
+          total_purchases: 0,
+          total_payments: 0,
+          total_returns: 0,
+          total_debit_notes: 0,
+          total_credit_notes: 0,
+          total_adjustments: 0,
+        }
+      );
+      const closingBalance = withRunning.length
+        ? withRunning[withRunning.length - 1].running_balance
+        : openingBalanceForRange;
+
+      const ledgerDesc = [...withRunning].reverse();
 
       return {
         supplier,
         payments: payments || [],
         purchases: purchases || [],
-        ledger,
+        ledger: ledgerDesc,
+        opening_balance: openingBalanceForRange,
+        closing_balance: closingBalance,
+        filters: { start_date: startDate, end_date: endDate, branch_id: branchFilter },
+        summary: {
+          opening_balance: openingBalanceForRange,
+          ...totals,
+          closing_balance: closingBalance,
+          outstanding_balance: closingBalance,
+        },
         totals: {
           total_purchases: num(supplier.total_ordered),
           total_paid: num(supplier.total_paid),
@@ -2023,6 +2816,93 @@ export async function handlePosAction(admin, caller, action, params = {}) {
 
     case "suppliers.getLedger": {
       return handlePosAction(admin, caller, "suppliers.getStatement", params);
+    }
+
+    case "suppliers.addStatementEntry": {
+      if (!isAdminLikeRole(caller.role)) {
+        return { success: false, error: "Only owners/admins can add ledger entries." };
+      }
+      const entryType = String(params.entry_type || "").trim();
+      if (!["debit_note", "credit_note", "adjustment"].includes(entryType)) {
+        return { success: false, error: "entry_type must be debit_note, credit_note, or adjustment." };
+      }
+      const amount = num(params.amount);
+      if (amount <= 0) return { success: false, error: "Amount must be positive." };
+      const side = entryType === "debit_note" ? "debit" : entryType === "credit_note" ? "credit" : String(params.side || "debit");
+      if (!["debit", "credit"].includes(side)) return { success: false, error: "side must be debit or credit." };
+
+      let sq2 = admin.from("suppliers").select("*").eq("id", params.supplier_id);
+      sq2 = companyFilter(sq2, companyId, platform);
+      const { data: supplier2 } = await sq2.maybeSingle();
+      if (!supplier2) return { success: false, error: "Supplier not found." };
+
+      const row = {
+        company_id: companyId,
+        supplier_id: supplier2.id,
+        branch_id: params.branch_id ? Number(params.branch_id) : null,
+        entry_type: entryType,
+        entry_date: params.entry_date ? String(params.entry_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+        reference: params.reference || null,
+        description: params.description || null,
+        debit: side === "debit" ? amount : 0,
+        credit: side === "credit" ? amount : 0,
+        notes: params.notes || null,
+        created_by: caller?.id || null,
+      };
+      const { data, error } = await admin.from("supplier_ledger_adjustments").insert(row).select("*").maybeSingle();
+      if (error) throw error;
+
+      await recomputeSupplierBalance(admin, supplier2.id, companyId);
+
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: `supplier_${entryType}`,
+        module: "suppliers",
+        details: { supplier_id: supplier2.id, entry_type: entryType, amount, side, reference: row.reference },
+      });
+
+      if (amount > 0) {
+        await postJournalEntries(admin, {
+          companyId,
+          caller,
+          refType: `supplier_${entryType}`,
+          refId: data?.id || null,
+          memo: row.description || `Supplier ${entryType.replace("_", " ")} — ${supplier2.name}`,
+          lines:
+            side === "debit"
+              ? [{ account: "Accounts Payable", debit: 0, credit: amount }, { account: "AP Adjustments", debit: amount, credit: 0 }]
+              : [{ account: "Accounts Payable", debit: amount, credit: 0 }, { account: "AP Adjustments", debit: 0, credit: amount }],
+        });
+      }
+
+      return { success: true, entry: data };
+    }
+
+    case "suppliers.deleteStatementEntry": {
+      if (!isAdminLikeRole(caller.role)) {
+        return { success: false, error: "Only owners/admins can delete ledger entries." };
+      }
+      let dq = admin.from("supplier_ledger_adjustments").select("*").eq("id", params.id);
+      dq = companyFilter(dq, companyId, platform);
+      const { data: existingEntry } = await dq.maybeSingle();
+      if (!existingEntry) return { success: false, error: "Entry not found." };
+
+      const { error: delErr } = await admin.from("supplier_ledger_adjustments").delete().eq("id", params.id);
+      if (delErr) throw delErr;
+
+      if (existingEntry.supplier_id) {
+        await recomputeSupplierBalance(admin, existingEntry.supplier_id, companyId);
+      }
+
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "supplier_statement_entry_delete",
+        module: "suppliers",
+        details: { id: existingEntry.id, entry_type: existingEntry.entry_type, supplier_id: existingEntry.supplier_id },
+      });
+      return { success: true };
     }
 
     case "suppliers.getPurchaseHistory": {
@@ -2189,10 +3069,46 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         return { success: false, error: "Company context required.", code: "NO_COMPANY" };
       }
 
+      // sales.user_id → public.profiles(id). Sync before insert so auth-only users never violate FK.
+      const saleBranchId = caller.branch_id || params.branch_id || null;
+      let publicUserId;
+      try {
+        const synced = await ensureUserSynced(admin, caller, {
+          company_id: saleCompanyId,
+          branch_id: saleBranchId,
+        });
+        publicUserId = synced.publicUserId;
+      } catch (syncErr) {
+        console.error("[sales.create] ensureUserSynced failed", {
+          auth_user_id: caller.id,
+          company_id: saleCompanyId,
+          branch_id: saleBranchId,
+          error: syncErr?.message || syncErr,
+        });
+        return {
+          success: false,
+          error: syncErr?.message || "Unable to sync cashier profile before sale.",
+          code: syncErr?.code || "PROFILE_SYNC",
+        };
+      }
+      if (!publicUserId) {
+        return { success: false, error: "Invalid cashier user id.", code: "INVALID_USER" };
+      }
+
+      console.info("[sales.create] pre-insert", {
+        auth_user_id: caller.id,
+        public_user_id: publicUserId,
+        company_id: saleCompanyId,
+        branch_id: saleBranchId,
+        cashier_id: publicUserId,
+        cashier_name: caller.name || null,
+        cashier_username: caller.username || null,
+      });
+
       const rpcPayload = {
         company_id: saleCompanyId,
-        user_id: caller.id,
-        branch_id: caller.branch_id || params.branch_id || null,
+        user_id: publicUserId,
+        branch_id: saleBranchId,
         cashier_name: caller.name,
         cashier_username: caller.username,
         branch_name: params.branch_name || "",
@@ -2223,7 +3139,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           await upsertInvoice(admin, {
             receipt_no: rpcData.receipt_no || sale.receipt_no,
             invoice_id: String(rpcData.id || sale.id),
-            company_name: params.company_name || "Nexora POS Enterprise",
+            company_name: params.company_name || "Nexora POS Pro",
             branch_name: rpcPayload.branch_name || "",
             customer_name: params.customer_name || "Walk-in",
             payment_method: rpcPayload.payment_method,
@@ -2241,6 +3157,78 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           });
         } catch {
           /* invoice registry best-effort */
+        }
+        // FIFO/FEFO lot consumption after scalar stock already updated by RPC
+        try {
+          for (const item of params.items || []) {
+            const pid = Number(item.product_id || item.id);
+            const q = Math.abs(num(item.qty));
+            if (!pid || !q) continue;
+            let pref = "fifo";
+            try {
+              const { data: prod } = await admin
+                .from("products")
+                .select("stock_preference")
+                .eq("id", pid)
+                .maybeSingle();
+              pref = String(prod?.stock_preference || "fifo").toLowerCase();
+            } catch {
+              /* ignore */
+            }
+            await consumeStockLots(admin, {
+              companyId: saleCompanyId,
+              productId: pid,
+              variantId: item.variant_id || null,
+              warehouseId: params.warehouse_id || null,
+              qty: q,
+              preference: pref === "fefo" ? "fefo" : "fifo",
+              referenceType: "sale",
+              referenceId: Number(rpcData.id || sale.id) || null,
+              caller,
+            });
+            if (Array.isArray(item.serials) && item.serials.length) {
+              await markSerialsSold(admin, {
+                companyId: saleCompanyId,
+                serials: item.serials,
+                saleId: Number(rpcData.id || sale.id) || null,
+              });
+            }
+          }
+        } catch {
+          /* lot ledger best-effort — sale already committed */
+        }
+        await writeAudit(admin, {
+          companyId: saleCompanyId,
+          caller,
+          action: "create_sale",
+          module: "sales",
+          details: { id: rpcData.id || sale.id, receipt_no: rpcData.receipt_no || sale.receipt_no, total: rpcPayload.total },
+        });
+
+        // Best-effort invoice/receipt SMS to the customer (combines payment +
+        // invoice confirmation into a single message to avoid double-billing
+        // the merchant's SMS quota for one transaction).
+        if (params.customer_id) {
+          try {
+            const { data: customer } = await admin
+              .from("customers")
+              .select("phone")
+              .eq("id", params.customer_id)
+              .maybeSingle();
+            if (customer?.phone) {
+              await notifyInvoiceSms({
+                phone: customer.phone,
+                invoiceNo: rpcData.receipt_no || sale.receipt_no || rpcData.id || sale.id,
+                amount: rpcPayload.total,
+                currencySymbol: rpcPayload.currency_symbol,
+                companyName: params.company_name || "Nexora POS Pro",
+                companyId: saleCompanyId,
+                userId: publicUserId,
+              });
+            }
+          } catch (smsErr) {
+            console.warn("[sales.create] invoice SMS failed", smsErr?.message || smsErr);
+          }
         }
         return rpcData;
       }
@@ -2297,13 +3285,13 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       const insertRow = {
         invoice_no: `TMP-${Date.now()}`,
         customer_id: params.customer_id || null,
-        user_id: caller.id,
+        user_id: publicUserId,
         subtotal: num(params.subtotal),
         discount: num(params.discount),
         vat: num(params.vat),
         total: num(params.total),
         payment_method: params.payment_method || "CASH",
-        branch_id: caller.branch_id || params.branch_id || null,
+        branch_id: saleBranchId,
         company_id: saleCompanyId,
         items_json: lineItems,
         created_at,
@@ -2366,7 +3354,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         await upsertInvoice(admin, {
           receipt_no,
           invoice_id: String(sale.id),
-          company_name: params.company_name || "Nexora POS Enterprise",
+          company_name: params.company_name || "Nexora POS Pro",
           branch_name: params.branch_name || "",
           customer_name: params.customer_name || "Walk-in",
           payment_method: params.payment_method || "CASH",
@@ -2385,6 +3373,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       } catch {
         /* best-effort */
       }
+
+      await writeAudit(admin, {
+        companyId: saleCompanyId,
+        caller,
+        action: "create_sale",
+        module: "sales",
+        details: { id: sale.id, receipt_no, total: num(params.total) },
+      });
 
       return {
         success: true,
@@ -2433,10 +3429,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "sales.getItems": {
+      const saleId = params.saleId ?? params.sale_id;
+      // sale_items has no company_id — scope via parent sale (migration 014).
+      const sale = await fetchTenantRow(admin, "sales", saleId, companyId, platform, "id");
+      if (!sale) return [];
       const { data, error } = await admin
         .from("sale_items")
         .select(LIST_COLUMNS.sale_items)
-        .eq("sale_id", params.saleId);
+        .eq("sale_id", sale.id);
       if (error) throw error;
       return data || [];
     }
@@ -2516,23 +3516,38 @@ export async function handlePosAction(admin, caller, action, params = {}) {
 
     case "sales.createReturn": {
       const saleId = Number(params.sale_id);
-      const { data: sale } = await admin.from("sales").select("*").eq("id", saleId).maybeSingle();
+      const sale = await fetchTenantRow(admin, "sales", saleId, companyId, platform);
       if (!sale) return { success: false, error: "Sale not found." };
       for (const item of params.items || []) {
-        const { data: product } = await admin.from("products").select("stock").eq("id", item.product_id).maybeSingle();
+        const product = await fetchTenantRow(admin, "products", item.product_id, companyId, platform, "id,stock");
+        if (!product) continue;
         await admin
           .from("products")
           .update({ stock: num(product?.stock) + num(item.qty) })
-          .eq("id", item.product_id);
+          .eq("id", product.id)
+          .eq("company_id", sale.company_id);
       }
       const returned = num(sale.returned) + (params.items || []).reduce((s, i) => s + num(i.qty) * num(i.price), 0);
       await trySb(
         admin
           .from("sales")
           .update({ returned, return_reason: params.reason || "", status: "Refunded" })
-          .eq("id", saleId),
-        async () => admin.from("sales").update({ returned, return_reason: params.reason || "" }).eq("id", saleId)
+          .eq("id", saleId)
+          .eq("company_id", sale.company_id),
+        async () =>
+          admin
+            .from("sales")
+            .update({ returned, return_reason: params.reason || "" })
+            .eq("id", saleId)
+            .eq("company_id", sale.company_id)
       );
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "create_sale_return",
+        module: "sales",
+        details: { sale_id: saleId, reason: params.reason || "" },
+      });
       return { success: true };
     }
 
@@ -2579,7 +3594,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     case "purchases.getItems": {
       const purchaseId = Number(params.id || params.purchase_id);
       if (!purchaseId) return [];
-      const { data: purchase } = await admin.from("purchases").select("*").eq("id", purchaseId).maybeSingle();
+      const purchase = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
       if (!purchase) return [];
       const items = Array.isArray(purchase.items_json) ? purchase.items_json : [];
       if (items.length) {
@@ -2598,6 +3613,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           qty_received: num(item.qty_received),
           qty_damaged: num(item.qty_damaged),
           cost: num(item.cost),
+          price: item.price != null ? num(item.price) : null,
           discount: num(item.discount),
           tax: num(item.tax ?? item.tax_rate),
           line_total: num(item.line_total ?? linePurchaseTotal(item).total),
@@ -2831,7 +3847,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         }
       }
       const sourceId = Number(params.id);
-      const { data: source } = await admin.from("purchases").select("*").eq("id", sourceId).maybeSingle();
+      const source = await fetchTenantRow(admin, "purchases", sourceId, companyId, platform);
       if (!source) return { success: false, error: "Purchase not found." };
       const items = await handlePosAction(admin, caller, "purchases.getItems", { id: sourceId });
       return handlePosAction(admin, caller, "purchases.create", {
@@ -2923,6 +3939,9 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           qty_ordered: qty,
           qty_received: 0,
           cost: num(item.cost),
+          // Selling price is a purchase-line override, never a purchase amount —
+          // only applied to the product when explicitly provided (> 0).
+          price: item.price !== undefined && item.price !== null && item.price !== "" ? num(item.price) : null,
           discount: num(item.discount),
           tax: num(item.tax ?? item.tax_rate),
           line_total: totals.total,
@@ -2961,6 +3980,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         }
       }
 
+      // Persist only pre-approval statuses on insert; Approved posts via purchases.approve.
+      const insertStatus = PURCHASE_POSTED_STATUSES.has(status) ? "Pending" : status;
       const payload = {
         po_number,
         supplier_id: Number(params.supplier_id),
@@ -2972,9 +3993,9 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         discount_total: header.discount_total,
         shipping: header.shipping,
         other_charges: header.other_charges,
-        amount_paid: amountPaid,
-        balance,
-        status,
+        amount_paid: 0,
+        balance: total,
+        status: insertStatus,
         item_count: normalizedItems.length,
         branch_id: params.branch_id || caller.branch_id,
         warehouse_id: params.warehouse_id || null,
@@ -2987,9 +4008,9 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         due_date: dueDate,
         payment_due_date: dueDate,
         created_by: caller.id || null,
-        ordered_at: status === "Ordered" || status === "Pending" ? new Date().toISOString() : null,
-        approved_at: status === "Ordered" ? new Date().toISOString() : null,
-        approved_by: status === "Ordered" ? caller.id || null : null,
+        ordered_at: insertStatus === "Pending" ? new Date().toISOString() : null,
+        approved_at: null,
+        approved_by: null,
       };
 
       let { data, error } = await admin.from("purchases").insert(payload).select("*").single();
@@ -3072,20 +4093,35 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           )
       );
 
-      for (const item of normalizedItems) {
-        if (!item.product_id) continue;
-        await quietSb(
-          admin.from("products").update({ cost: item.cost, last_cost: item.cost }).eq("id", item.product_id)
-        );
-      }
-
-      if (amountPaid > 0 && status !== "Draft") {
-        await handlePosAction(admin, caller, "purchases.addPayment", {
-          purchase_id: data.id,
-          amount: amountPaid,
-          method: params.payment_method || "Cash",
-          skip_balance_update: true,
-        }).catch(() => null);
+      // Nothing posts to inventory or supplier AP before Approval.
+      // If caller requested Approved on create, run the atomic approve path.
+      if (PURCHASE_POSTED_STATUSES.has(status) || status === "Approved") {
+        const approved = await handlePosAction(admin, caller, "purchases.approve", {
+          id: data.id,
+          warehouse_id: payload.warehouse_id,
+        });
+        if (approved?.success === false) return approved;
+        if (amountPaid > 0) {
+          await handlePosAction(admin, caller, "purchases.addPayment", {
+            purchase_id: data.id,
+            amount: amountPaid,
+            method: params.payment_method || "Cash",
+          }).catch(() => null);
+        }
+        await writeAudit(admin, {
+          companyId,
+          caller,
+          action: "create_purchase",
+          module: "purchases",
+          details: { id: data.id, po_number, supplier_id: payload.supplier_id, total, status: "Approved" },
+        });
+        return {
+          success: true,
+          id: data.id,
+          po_number,
+          purchase: { ...data, status: "Approved", ...(approved || {}) },
+          status: "Approved",
+        };
       }
 
       await writeAudit(admin, {
@@ -3112,10 +4148,16 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         }
       }
       const purchaseId = Number(params.id);
-      const { data: existing } = await admin.from("purchases").select("*").eq("id", purchaseId).maybeSingle();
+      const existing = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
       if (!existing) return { success: false, error: "Purchase not found." };
       if (String(existing.status) === "Cancelled") {
         return { success: false, error: "Cancelled purchases cannot be edited." };
+      }
+      if (PURCHASE_POSTED_STATUSES.has(String(existing.status)) && params.items) {
+        return {
+          success: false,
+          error: "Approved/received purchases cannot change line items — use returns or a new PO.",
+        };
       }
       if (String(existing.status) === "Received" && params.items) {
         return { success: false, error: "Fully received purchases cannot change line items." };
@@ -3150,6 +4192,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             qty_ordered: qty,
             qty_received: num(item.qty_received),
             cost: num(item.cost),
+            price: item.price !== undefined && item.price !== null && item.price !== "" ? num(item.price) : null,
             discount: num(item.discount),
             tax: num(item.tax ?? item.tax_rate),
             line_total: totals.total,
@@ -3241,11 +4284,172 @@ export async function handlePosAction(admin, caller, action, params = {}) {
               )
             )
         );
-        const { data: refreshed } = await admin.from("purchases").select("*").eq("id", purchaseId).maybeSingle();
+        const refreshed = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
         if (refreshed) data = refreshed;
+        // Product cost / avg cost / stock are applied only on purchases.approve — never on Draft/Pending edits.
       }
 
+      // Pre-approval edits do not book AP; recompute is a no-op for Pending/Draft in the ledger view.
+      if (existing.supplier_id && (normalizedItems || updates.status !== undefined)) {
+        await recomputeSupplierBalance(admin, existing.supplier_id, companyId);
+      }
+
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "update_purchase",
+        module: "purchases",
+        details: { id: purchaseId, po_number: existing.po_number, changes: Object.keys(updates) },
+      });
+
       return { success: true, purchase: data };
+    }
+
+    case "purchases.approve": {
+      {
+        const matrix = await loadPermissionMatrix(admin, companyId);
+        if (!canPurchaseAction(caller.role, "approve", matrix) && !canPurchaseAction(caller.role, "edit", matrix)) {
+          return denyPurchase("approve purchase orders");
+        }
+      }
+      const purchaseId = Number(params.id || params.purchase_id);
+      if (!purchaseId) return { success: false, error: "Purchase id is required." };
+
+      // Prefer single-transaction RPC (migration 026). Fall back to orchestrated JS path.
+      try {
+        const { data: rpcData, error: rpcError } = await admin.rpc("pos_approve_purchase", {
+          payload: {
+            purchase_id: purchaseId,
+            company_id: companyId,
+            user_id: caller.id || null,
+            user_name: caller.name || caller.username || "",
+            warehouse_id: params.warehouse_id || null,
+          },
+        });
+        if (!rpcError && rpcData) {
+          const body = typeof rpcData === "string" ? JSON.parse(rpcData) : rpcData;
+          if (body?.success === false) {
+            return { success: false, error: body.error || "Unable to approve purchase.", code: body.code };
+          }
+          return {
+            success: true,
+            id: purchaseId,
+            status: body.status || "Approved",
+            invoice_no: body.invoice_no,
+            qty_received: body.qty_received,
+            stock_value: body.stock_value,
+            already_approved: Boolean(body.already_approved),
+            transactional: true,
+          };
+        }
+        if (rpcError && !/function|does not exist|PGRST202/i.test(String(rpcError.message || rpcError.code || ""))) {
+          return { success: false, error: rpcError.message || "Approve RPC failed." };
+        }
+      } catch (rpcErr) {
+        if (!/function|does not exist|PGRST202/i.test(String(rpcErr?.message || ""))) {
+          throw rpcErr;
+        }
+      }
+
+      // JS fallback (best-effort atomicity): approve → stock/cost → AP recompute → journal
+      const purchase = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
+      if (!purchase) return { success: false, error: "Purchase not found." };
+      const current = String(purchase.status);
+      // Enterprise rule: every approved purchase always receives into the Main
+      // Store warehouse — any warehouse_id supplied by the caller is ignored.
+      const mainWarehouseId = await resolveMainWarehouseId(admin, companyId);
+      if (PURCHASE_POSTED_STATUSES.has(current) && current !== "Ordered") {
+        return { success: true, id: purchaseId, status: current === "Ordered" ? "Approved" : current, already_approved: true };
+      }
+      if (current === "Ordered") {
+        await quietSb(admin.from("purchases").update({ status: "Approved" }).eq("id", purchaseId));
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
+        return { success: true, id: purchaseId, status: "Approved", already_approved: true };
+      }
+      if (["Cancelled", "Rejected"].includes(current)) {
+        return { success: false, error: "Cancelled or rejected purchases cannot be approved." };
+      }
+      if (!["Draft", "Pending"].includes(current)) {
+        return { success: false, error: `Purchase status ${current} cannot be approved.` };
+      }
+
+      const invoiceNo = String(purchase.invoice_no || purchase.po_number || `PI-${purchase.id}`).trim();
+      const stamp = new Date().toISOString();
+      const { error: statusErr } = await admin
+        .from("purchases")
+        .update({
+          status: "Approved",
+          invoice_no: invoiceNo,
+          approved_at: stamp,
+          approved_by: caller.id || null,
+          ordered_at: purchase.ordered_at || stamp,
+          accounting_posted_at: stamp,
+          warehouse_id: mainWarehouseId || purchase.warehouse_id || null,
+        })
+        .eq("id", purchaseId)
+        .in("status", ["Draft", "Pending", "Ordered"]);
+      if (statusErr) {
+        if (isMissingColumnError(statusErr)) {
+          await admin.from("purchases").update({
+            status: "Approved",
+            invoice_no: invoiceNo,
+            approved_at: stamp,
+            approved_by: caller.id || null,
+          }).eq("id", purchaseId);
+        } else throw statusErr;
+      }
+
+      // Apply inventory via existing receive path (full receive) once approved.
+      const received = await handlePosAction(admin, caller, "purchases.receive", {
+        id: purchaseId,
+        receive_all: true,
+        warehouse_id: mainWarehouseId || purchase.warehouse_id || null,
+        from_approve: true,
+      });
+      if (received?.success === false) {
+        // Roll back approval status so nothing remains half-posted.
+        await quietSb(
+          admin.from("purchases").update({
+            status: current,
+            approved_at: null,
+            approved_by: null,
+            accounting_posted_at: null,
+            inventory_posted_at: null,
+          }).eq("id", purchaseId)
+        );
+        return received;
+      }
+
+      await quietSb(
+        admin.from("purchases").update({
+          status: "Approved",
+          inventory_posted_at: stamp,
+          accounting_posted_at: stamp,
+        }).eq("id", purchaseId)
+      );
+      await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "approve_purchase",
+        module: "purchases",
+        details: {
+          id: purchaseId,
+          po_number: purchase.po_number,
+          invoice_no: invoiceNo,
+          qty_received: received?.qty_received,
+          stock_value: received?.stock_value,
+        },
+      });
+      return {
+        success: true,
+        id: purchaseId,
+        status: "Approved",
+        invoice_no: invoiceNo,
+        qty_received: received?.qty_received || 0,
+        stock_value: received?.stock_value || 0,
+        transactional: false,
+      };
     }
 
     case "purchases.receive": {
@@ -3255,8 +4459,12 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           return denyPurchase("receive purchases");
         }
       }
-      const { data: purchase } = await admin.from("purchases").select("*").eq("id", params.id).maybeSingle();
+      const purchase = await fetchTenantRow(admin, "purchases", params.id, companyId, platform);
       if (!purchase) return { success: false, error: "Purchase not found." };
+      // Enterprise rule: all approved purchases receive into the Main Store —
+      // never into any other warehouse. Sales-facing warehouses only ever get
+      // stock via an explicit Stock Transfer out of the Main Store.
+      const mainWarehouseId = await resolveMainWarehouseId(admin, companyId);
       const currentStatus = String(purchase.status);
       if (currentStatus === "Received") {
         return { success: false, error: "Purchase already fully received." };
@@ -3265,7 +4473,22 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         return { success: false, error: "Cancelled purchases cannot be received." };
       }
       if (currentStatus === "Draft") {
-        return { success: false, error: "Draft purchases must be submitted before receiving." };
+        return { success: false, error: "Draft purchases must be submitted and approved before receiving." };
+      }
+      if (currentStatus === "Pending" && !params.from_approve) {
+        return { success: false, error: "Purchase must be Approved before stock/accounting updates." };
+      }
+      // Already posted on approve — confirming GRN only marks Received.
+      if (purchase.inventory_posted_at && !params.from_approve) {
+        await trySb(
+          admin.from("purchases").update({
+            status: "Received",
+            received_at: purchase.received_at || new Date().toISOString(),
+          }).eq("id", params.id),
+          async () => admin.from("purchases").update({ status: "Received" }).eq("id", params.id)
+        );
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
+        return { success: true, status: "Received", qty_received: 0, stock_value: 0, already_posted: true };
       }
 
       let items = Array.isArray(purchase.items_json) ? [...purchase.items_json] : [];
@@ -3372,18 +4595,58 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           movementRows.push({
             company_id: companyId,
             product_id: plan.productId,
+            warehouse_id: mainWarehouseId || null,
             type: "in",
             qty: plan.toReceive,
             note: `Purchase receive ${purchase.po_number || purchase.id}${
               plan.item.batch_no ? ` batch ${plan.item.batch_no}` : ""
-            }${plan.damaged ? ` (damaged noted: ${plan.damaged})` : ""}`,
+            }${plan.damaged ? ` (damaged noted: ${plan.damaged})` : ""} → Main Store`,
             user_id: caller.id,
             user_name: caller.name,
+            reference_type: "purchase",
+            reference_id: purchase.id,
           });
         }
         plan.item.qty_received = plan.already + plan.toReceive;
         stockedQty += plan.toReceive;
         stockedValue += plan.toReceive * unitCost;
+        if (companyId != null && plan.toReceive > 0) {
+          const lot = await receiveStockLot(admin, {
+            companyId,
+            productId: plan.productId,
+            warehouseId: mainWarehouseId,
+            qty: plan.toReceive,
+            unitCost,
+            batchNumber: plan.item.batch_no || null,
+            manufacturingDate: plan.item.mfg_date || null,
+            expiryDate: plan.item.expiry_date || null,
+            referenceType: "purchase",
+            referenceId: purchase.id,
+          });
+          await applyWarehouseStockDelta(admin, {
+            companyId,
+            warehouseId: mainWarehouseId,
+            productId: plan.productId,
+            delta: plan.toReceive,
+            batch_number: plan.item.batch_no || null,
+            expiry_date: plan.item.expiry_date || null,
+          });
+          if (plan.item.serial_no) {
+            const serials = String(plan.item.serial_no)
+              .split(/[,;\n]+/)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (serials.length) {
+              await registerSerials(admin, {
+                companyId,
+                productId: plan.productId,
+                warehouseId: mainWarehouseId,
+                lotId: lot?.id || null,
+                serials,
+              });
+            }
+          }
+        }
       }
 
       // Prefer updates with avg/last cost; fall back if columns missing
@@ -3418,7 +4681,6 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       }
 
       const nextStatus = deriveReceiveStatus(items) || "PartiallyReceived";
-      const wasFirstReceive = !["Received", "PartiallyReceived"].includes(currentStatus);
 
       await trySb(
         admin
@@ -3430,7 +4692,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
               nextStatus === "Received"
                 ? new Date().toISOString()
                 : purchase.received_at || new Date().toISOString(),
-            warehouse_id: params.warehouse_id || purchase.warehouse_id || null,
+            warehouse_id: mainWarehouseId || purchase.warehouse_id || null,
           })
           .eq("id", params.id),
         async () =>
@@ -3466,33 +4728,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         )
       );
 
-      // Supplier balance / totals: book on first receive (partial or full)
-      if (wasFirstReceive && purchase.supplier_id) {
-        const { data: supplier } = await admin
-          .from("suppliers")
-          .select("balance,order_count,total_ordered,total_paid")
-          .eq("id", purchase.supplier_id)
-          .maybeSingle();
-        if (supplier) {
-          const supplierUpdates = {
-            balance: num(supplier.balance) + num(purchase.total) - num(purchase.amount_paid),
-            order_count: num(supplier.order_count) + 1,
-            total_ordered: num(supplier.total_ordered) + num(purchase.total),
-            last_purchase_at: new Date().toISOString(),
-          };
-          await trySb(
-            admin.from("suppliers").update(supplierUpdates).eq("id", purchase.supplier_id),
-            async () =>
-              admin
-                .from("suppliers")
-                .update({
-                  balance: supplierUpdates.balance,
-                  order_count: supplierUpdates.order_count,
-                  total_ordered: supplierUpdates.total_ordered,
-                })
-                .eq("id", purchase.supplier_id)
-          );
-        }
+      // Supplier AP balance is already booked at invoice creation (Draft → Pending/etc);
+      // receiving stock does not change the liability, only the inventory side of the
+      // entry. Still stamp last_purchase_at and re-sync totals/order_count defensively
+      // in case this purchase somehow skipped the create-time booking (legacy rows).
+      if (purchase.supplier_id) {
+        await quietSb(
+          admin.from("suppliers").update({ last_purchase_at: new Date().toISOString() }).eq("id", purchase.supplier_id)
+        );
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
       }
 
       // Ensure purchase balance columns exist / stay aligned
@@ -3550,7 +4794,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       if (!purchaseId || amount <= 0) {
         return { success: false, error: "Purchase and a positive amount are required." };
       }
-      const { data: purchase } = await admin.from("purchases").select("*").eq("id", purchaseId).maybeSingle();
+      const purchase = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
       if (!purchase) return { success: false, error: "Purchase not found." };
       if (String(purchase.status) === "Cancelled") {
         return { success: false, error: "Cannot pay a cancelled purchase." };
@@ -3646,33 +4890,16 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         );
       }
 
-      // Mirror onto supplier AP ledger when purchase already booked (received)
-      const booked = ["Received", "PartiallyReceived"].includes(String(purchase.status));
-      if (booked && purchase.supplier_id && !params.skip_supplier) {
-        await bumpSupplierPaymentMeta(admin, purchase.supplier_id, ledgerAmount, companyId);
-        await trySb(
-          admin.from("supplier_payments").insert({
-            supplier_id: purchase.supplier_id,
-            amount: fx.original_amount,
-            method: params.method || "Cash",
-            company_id: companyId,
-            purchase_id: purchaseId,
-            reference: params.reference || purchase.po_number,
-            payment_currency: fx.payment_currency,
-            exchange_rate: fx.exchange_rate,
-            original_amount: fx.original_amount,
-            base_amount: fx.base_amount,
-            converted_amount: fx.converted_amount,
-            fx_gain_loss: fx.fx_gain_loss,
-            payment_date: fx.payment_date,
-            invoice_currency: fx.invoice_currency,
-          }),
-          async () =>
-            admin.from("supplier_payments").insert({
-              supplier_id: purchase.supplier_id,
-              amount: fx.original_amount,
-              method: params.method || "Cash",
-            })
+      // The payment is already recorded once in purchase_payments (tagged with
+      // supplier_id above) and supplier_ledger_v reads that table directly — do NOT
+      // also insert into supplier_payments here, or the same payment would be double-
+      // counted in the statement. Just resync the AP balance from the ledger. An
+      // invoice is payable as soon as it is booked (Pending/Ordered/etc.), not only
+      // once it has been received, so this runs unconditionally.
+      if (purchase.supplier_id && !params.skip_supplier && !params.skip_recompute) {
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
+        await quietSb(
+          admin.from("suppliers").update({ last_payment_at: new Date().toISOString() }).eq("id", purchase.supplier_id)
         );
       }
 
@@ -3722,6 +4949,30 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         });
       }
 
+      // Best-effort payment confirmation SMS to the supplier.
+      if (purchase.supplier_id) {
+        try {
+          const { data: supplier } = await admin
+            .from("suppliers")
+            .select("phone,name")
+            .eq("id", purchase.supplier_id)
+            .maybeSingle();
+          if (supplier?.phone) {
+            await notifyPaymentConfirmationSms({
+              phone: supplier.phone,
+              amount: fx.original_amount,
+              currencySymbol: params.currency_symbol || "",
+              reference: params.reference || purchase.po_number || null,
+              recipientName: supplier.name,
+              companyId,
+              userId: caller.id || null,
+            });
+          }
+        } catch (smsErr) {
+          console.warn("[purchases.addPayment] payment confirmation SMS failed", smsErr?.message || smsErr);
+        }
+      }
+
       return { success: true, amount_paid: appliedPaid, balance: newBalance, payment: fx };
     }
 
@@ -3732,13 +4983,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           return denyPurchase("cancel purchase orders");
         }
       }
-      const { data: purchase } = await admin.from("purchases").select("*").eq("id", params.id).maybeSingle();
+      const purchase = await fetchTenantRow(admin, "purchases", params.id, companyId, platform);
       if (!purchase) return { success: false, error: "Purchase not found." };
       if (String(purchase.status) === "Cancelled") {
         return { success: false, error: "Purchase already cancelled." };
       }
-      if (String(purchase.status) === "Received") {
-        return { success: false, error: "Fully received purchases cannot be cancelled — use returns." };
+      if (String(purchase.status) === "Received" || String(purchase.status) === "Approved") {
+        if (purchase.inventory_posted_at || PURCHASE_POSTED_STATUSES.has(String(purchase.status))) {
+          return { success: false, error: "Approved/received purchases cannot be cancelled — use returns / credit notes." };
+        }
       }
       if (String(purchase.status) === "PartiallyReceived") {
         return { success: false, error: "Partially received purchases cannot be cancelled — receive remaining or return stock." };
@@ -3750,6 +5003,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           .eq("id", params.id),
         async () => admin.from("purchases").update({ status: "Cancelled" }).eq("id", params.id)
       );
+      // supplier_ledger_v excludes Cancelled purchases, so this automatically reverses
+      // the liability that was booked when the invoice left Draft.
+      if (purchase.supplier_id) {
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
+      }
       await writeAudit(admin, {
         companyId,
         caller,
@@ -3767,18 +5025,27 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           return denyPurchase("update purchase status");
         }
       }
-      const { data: existing } = await admin.from("purchases").select("*").eq("id", params.id).maybeSingle();
+      const existing = await fetchTenantRow(admin, "purchases", params.id, companyId, platform);
       if (!existing) return { success: false, error: "Purchase not found." };
       const status = normalizePurchaseStatus(params.status, "Pending");
       if (status === "Cancelled") {
         return handlePosAction(admin, caller, "purchases.cancel", { id: params.id });
       }
+      if (status === "Approved") {
+        return handlePosAction(admin, caller, "purchases.approve", {
+          id: params.id,
+          warehouse_id: params.warehouse_id,
+        });
+      }
       if (status === "Received" || status === "PartiallyReceived") {
         return { success: false, error: "Use purchases.receive to receive stock." };
       }
       if (status === "Rejected") {
-        if (!["Draft", "Pending", "Ordered"].includes(String(existing.status))) {
-          return { success: false, error: "Only Draft/Pending/Ordered POs can be rejected." };
+        if (!["Draft", "Pending", "Ordered", "Approved"].includes(String(existing.status))) {
+          return { success: false, error: "Only Draft/Pending/Approved POs can be rejected." };
+        }
+        if (PURCHASE_POSTED_STATUSES.has(String(existing.status)) && existing.inventory_posted_at) {
+          return { success: false, error: "Approved purchases with posted inventory cannot be rejected — use returns." };
         }
         const reason = params.rejection_reason || params.reason || "Rejected";
         await trySb(
@@ -3793,6 +5060,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             .eq("id", params.id),
           async () => admin.from("purchases").update({ status: "Rejected" }).eq("id", params.id)
         );
+        // supplier_ledger_v excludes Draft/Cancelled/Rejected purchases from AP debits
+        // (migration 025) — resync so a rejected PO never inflates the outstanding balance.
+        if (existing.supplier_id) {
+          await recomputeSupplierBalance(admin, existing.supplier_id, companyId);
+        }
         await writeAudit(admin, {
           companyId,
           caller,
@@ -3803,16 +5075,10 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         return { success: true, status: "Rejected" };
       }
       const patch = { status };
-      if (status === "Ordered") {
-        patch.ordered_at = new Date().toISOString();
-        patch.approved_at = new Date().toISOString();
-        patch.approved_by = caller.id || null;
-        patch.rejected_at = null;
-        patch.rejection_reason = null;
-      }
       if (status === "Pending" && String(existing.status) === "Draft") {
         patch.ordered_at = new Date().toISOString();
       }
+      // Status changes before Approval never touch stock or supplier AP.
       await trySb(
         admin.from("purchases").update(patch).eq("id", params.id),
         async () => admin.from("purchases").update({ status }).eq("id", params.id)
@@ -3820,11 +5086,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       await writeAudit(admin, {
         companyId,
         caller,
-        action: status === "Ordered" ? "approve_purchase" : "update_purchase_status",
+        action: "update_purchase_status",
         module: "purchases",
         details: { id: existing.id, po_number: existing.po_number, from: existing.status, to: status },
       });
-      return { success: true, status };
+      return { success: true, status, status_label: purchaseStatusLabel(status) };
     }
 
     case "purchases.createReturn": {
@@ -3842,7 +5108,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       if (qty <= 0) return { success: false, error: "Return quantity must be positive." };
       const purchaseId = Number(params.purchase_id);
       const productId = Number(params.product_id);
-      const { data: purchase } = await admin.from("purchases").select("*").eq("id", purchaseId).maybeSingle();
+      const purchase = await fetchTenantRow(admin, "purchases", purchaseId, companyId, platform);
       if (!purchase) return { success: false, error: "Purchase not found." };
       if (!["Received", "PartiallyReceived"].includes(String(purchase.status))) {
         return { success: false, error: "Only received purchases can be returned." };
@@ -3855,8 +5121,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         cost: num(params.cost),
         reason: params.reason || "",
         company_id: companyId,
+        supplier_id: purchase.supplier_id || null,
+        branch_id: purchase.branch_id || null,
       };
       let { error } = await admin.from("purchase_returns").insert(row);
+      if (error && isMissingColumnError(error)) {
+        delete row.supplier_id;
+        delete row.branch_id;
+        ({ error } = await admin.from("purchase_returns").insert(row));
+      }
       if (error && isMissingColumnError(error)) {
         delete row.company_id;
         ({ error } = await admin.from("purchase_returns").insert(row));
@@ -3885,18 +5158,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       }
 
       const credit = qty * num(params.cost);
-      if (purchase.supplier_id && credit > 0) {
-        const { data: supplier } = await admin
-          .from("suppliers")
-          .select("balance")
-          .eq("id", purchase.supplier_id)
-          .maybeSingle();
-        if (supplier) {
-          await admin
-            .from("suppliers")
-            .update({ balance: Math.max(0, num(supplier.balance) - credit) })
-            .eq("id", purchase.supplier_id);
-        }
+      if (purchase.supplier_id) {
+        await recomputeSupplierBalance(admin, purchase.supplier_id, companyId);
       }
 
       await writeAudit(admin, {
@@ -3943,15 +5206,16 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "expenses.getCategories":
-      return listScoped(admin, "expense_categories", caller, "id,name", { softCap: 200 }).catch(async () => {
-        const { data } = await admin.from("expense_categories").select("id,name");
-        return data || [];
-      });
+      return listScoped(admin, "expense_categories", { ...caller, company_id: companyId }, "id,name", {
+        softCap: 200,
+      }).catch(() => []);
 
     case "expenses.createCategory": {
+      const insert = { name: String(params.name || "").trim() };
+      if (companyId != null && companyId !== "") insert.company_id = companyId;
       const { data, error } = await admin
         .from("expense_categories")
-        .insert({ name: String(params.name || "").trim() })
+        .insert(insert)
         .select("*")
         .single();
       if (error) throw error;
@@ -3991,6 +5255,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         ({ data, error } = await admin.from("expenses").insert(payload).select("*").single());
       }
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "create_expense", module: "expenses", details: { id: data.id, amount: data.amount } });
       return { success: true, expense: data };
     }
 
@@ -3999,12 +5264,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       delete updates.id;
       const { data, error } = await admin.from("expenses").update(updates).eq("id", params.id).select("*").maybeSingle();
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "update_expense", module: "expenses", details: { id: params.id } });
       return { success: true, expense: data };
     }
 
     case "expenses.delete": {
       const { error } = await admin.from("expenses").delete().eq("id", params.id);
       if (error) throw error;
+      await writeAudit(admin, { companyId, caller, action: "delete_expense", module: "expenses", details: { id: params.id } });
       return { success: true };
     }
 
@@ -4200,7 +5467,50 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "inventory.getWarehouseStock": {
-      // PARTIAL: no per-warehouse balance table — attribute company stock to warehouses proportionally / primary.
+      const filterWh = params.warehouseId || params.warehouse_id;
+      let wsq = admin
+        .from("warehouse_stock")
+        .select("id,company_id,warehouse_id,product_id,qty,batch_number,expiry_date,updated_at")
+        .order("updated_at", { ascending: false })
+        .limit(5000);
+      wsq = companyFilter(wsq, companyId, platform);
+      if (filterWh) wsq = wsq.eq("warehouse_id", Number(filterWh));
+      const { data: stockRows, error: wsErr } = await wsq;
+      if (!wsErr && Array.isArray(stockRows)) {
+        const [products, warehouses] = await Promise.all([
+          filterActiveProducts(
+            await listScoped(admin, "products", { ...caller, company_id: companyId }, LIST_COLUMNS.products, {
+              softCap: DEFAULT_LIST_CAP,
+            }).catch(() => [])
+          ),
+          listScoped(admin, "warehouses", { ...caller, company_id: companyId }, LIST_COLUMNS.warehouses, {
+            softCap: 500,
+          }).catch(() => []),
+        ]);
+        const pMap = new Map((products || []).map((p) => [Number(p.id), p]));
+        const wMap = new Map((warehouses || []).map((w) => [Number(w.id), w]));
+        return stockRows
+          .filter((r) => num(r.qty) > 0 || !filterWh)
+          .map((r) => {
+            const p = pMap.get(Number(r.product_id));
+            const w = wMap.get(Number(r.warehouse_id));
+            return {
+              id: r.id,
+              warehouse_id: r.warehouse_id,
+              warehouse_name: w?.name || `WH ${r.warehouse_id}`,
+              product_id: r.product_id,
+              product_name: p?.name || `#${r.product_id}`,
+              qty: num(r.qty),
+              batch_number: r.batch_number || null,
+              expiry_date: r.expiry_date || p?.expiry_date || null,
+              cost: num(p?.cost),
+              value: num(r.qty) * num(p?.cost),
+            };
+          });
+      }
+      if (wsErr && !isMissingTableError(wsErr)) throw wsErr;
+
+      // Fallback before migration 018: attribute company stock to primary warehouse.
       const [products, warehouses] = await Promise.all([
         filterActiveProducts(
           await listScoped(admin, "products", { ...caller, company_id: companyId }, LIST_COLUMNS.products, {
@@ -4226,7 +5536,6 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           value: num(p.stock) * num(p.cost),
         }));
       }
-      const filterWh = params.warehouseId || params.warehouse_id;
       const targets = filterWh ? activeWh.filter((w) => Number(w.id) === Number(filterWh)) : activeWh;
       const primary = targets[0] || activeWh[0];
       const rows = [];
@@ -4355,14 +5664,35 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       const fromWh = Number(params.from_warehouse_id) || null;
       const toWh = Number(params.to_warehouse_id) || null;
       if (!productId || !qty) return { success: false, error: "Product and quantity are required." };
-      if (fromWh && toWh && fromWh === toWh) return { success: false, error: "Source and destination warehouses must differ." };
+      // Enterprise Warehouse Management: sales-facing warehouses never receive
+      // stock directly from Purchases — every move between warehouses must be
+      // an explicit Stock Transfer, and every transfer must touch the Main
+      // Store on one side (out of it to stock a branch/store, or back into it
+      // as a return). Both endpoints are required; no more "company total"
+      // transfers with an implicit warehouse.
+      if (!fromWh || !toWh) {
+        return { success: false, error: "Both a source and destination warehouse are required for a stock transfer." };
+      }
+      if (fromWh === toWh) return { success: false, error: "Source and destination warehouses must differ." };
+      const mainWarehouseId = await resolveMainWarehouseId(admin, companyId);
+      if (mainWarehouseId && fromWh !== mainWarehouseId && toWh !== mainWarehouseId) {
+        return {
+          success: false,
+          error: "Stock transfers must originate from or return to the Main Store warehouse.",
+        };
+      }
 
       let pq = admin.from("products").select("*").eq("id", productId);
       pq = companyFilter(pq, companyId, platform);
       const { data: product, error } = await pq.maybeSingle();
       if (error) throw error;
       if (!product) return { success: false, error: "Product not found." };
-      if (num(product.stock) < qty) return { success: false, error: "Insufficient stock to transfer." };
+      const available = await readWarehouseStockQty(admin, companyId, fromWh, productId);
+      if (available != null && available < qty) {
+        return { success: false, error: `Insufficient warehouse stock (available ${available}).` };
+      } else if (available == null && num(product.stock) < qty) {
+        return { success: false, error: "Insufficient stock to transfer." };
+      }
 
       const transferPayload = {
         company_id: companyId,
@@ -4396,9 +5726,28 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         transfer = data;
       }
 
-      // Scalar stock unchanged for same-company warehouse transfer (PARTIAL warehouse balances).
-      // Record paired movements for audit trail only.
+      // Same-company warehouse transfer: move warehouse_stock; products.stock total unchanged.
       if (companyId != null) {
+        if (fromWh) {
+          await applyWarehouseStockDelta(admin, {
+            companyId,
+            warehouseId: fromWh,
+            productId,
+            delta: -qty,
+            batch_number: params.batch_number || null,
+            expiry_date: params.expiry_date || null,
+          });
+        }
+        if (toWh) {
+          await applyWarehouseStockDelta(admin, {
+            companyId,
+            warehouseId: toWh,
+            productId,
+            delta: qty,
+            batch_number: params.batch_number || null,
+            expiry_date: params.expiry_date || null,
+          });
+        }
         await quietSb(
           admin.from("stock_movements").insert([
             {
@@ -4438,7 +5787,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         caller,
         action: "stock_transfer",
         module: "inventory",
-        details: { id: transfer.id, product_id: productId, qty, from_warehouse_id: fromWh, to_warehouse_id: toWh },
+        details: {
+          id: transfer.id,
+          product_id: productId,
+          qty,
+          from_warehouse_id: fromWh,
+          to_warehouse_id: toWh,
+          direction: fromWh === mainWarehouseId ? "main_store_to_warehouse" : "warehouse_to_main_store",
+        },
       });
       return { success: true, transfer };
     }
@@ -4479,6 +5835,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         variant_id: params.variant_id || null,
         reference_type: type,
         reference_id: null,
+        serials: Array.isArray(params.serials)
+          ? params.serials
+          : params.serial_numbers
+            ? String(params.serial_numbers).split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean)
+            : null,
       });
       await writeAudit(admin, {
         companyId,
@@ -4582,6 +5943,123 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         throw error;
       }
       return data || [];
+    }
+
+    case "inventory.listVariantSkus": {
+      return listVariantSkus(admin, companyId, {
+        productId: params.product_id || params.productId || null,
+        limit: params.limit,
+      });
+    }
+
+    case "inventory.upsertVariantSku": {
+      const result = await upsertVariantSku(admin, {
+        companyId,
+        productId: params.product_id || params.productId,
+        id: params.id || null,
+        name: params.name,
+        sku: params.sku,
+        barcode: params.barcode,
+        attributes: params.attributes,
+        price: params.price,
+        cost: params.cost,
+        stock: params.stock,
+        active: params.active,
+      });
+      if (result.success) {
+        await writeAudit(admin, {
+          companyId,
+          caller,
+          action: params.id ? "variant_update" : "variant_create",
+          module: "inventory",
+          details: { id: result.variant?.id, product_id: params.product_id },
+        });
+      }
+      return result;
+    }
+
+    case "inventory.listSerials": {
+      return listSerials(admin, companyId, {
+        productId: params.product_id || params.productId || null,
+        status: params.status || null,
+        limit: params.limit,
+      });
+    }
+
+    case "inventory.registerSerials": {
+      const result = await registerSerials(admin, {
+        companyId,
+        productId: params.product_id || params.productId,
+        variantId: params.variant_id || null,
+        warehouseId: params.warehouse_id || null,
+        lotId: params.lot_id || null,
+        serials: params.serials || String(params.serial_numbers || "").split(/[,;\n]+/),
+      });
+      if (result.success) {
+        await writeAudit(admin, {
+          companyId,
+          caller,
+          action: "serial_register",
+          module: "inventory",
+          details: { product_id: params.product_id, count: result.inserted },
+        });
+      }
+      return result;
+    }
+
+    case "inventory.listOpenLots": {
+      return listOpenLots(admin, companyId, {
+        productId: params.product_id || params.productId || null,
+        warehouseId: params.warehouse_id || null,
+        limit: params.limit,
+      });
+    }
+
+    case "inventory.previewLotPick": {
+      const productId = Number(params.product_id);
+      const qty = Math.abs(num(params.qty, 1));
+      if (!productId) return { success: false, error: "product_id required." };
+      let pref = String(params.preference || "").toLowerCase();
+      if (!pref || pref === "auto") {
+        const { data: prod } = await admin.from("products").select("stock_preference").eq("id", productId).maybeSingle();
+        pref = String(prod?.stock_preference || "fifo").toLowerCase();
+      }
+      const lots = await listOpenLots(admin, companyId, {
+        productId,
+        warehouseId: params.warehouse_id || null,
+        limit: 100,
+      });
+      const ordered =
+        pref === "fefo"
+          ? [...lots].sort((a, b) => {
+              const ae = a.expiry_date || "9999-12-31";
+              const be = b.expiry_date || "9999-12-31";
+              if (ae !== be) return ae < be ? -1 : 1;
+              return String(a.received_at).localeCompare(String(b.received_at));
+            })
+          : [...lots].sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)));
+      let left = qty;
+      const plan = [];
+      for (const lot of ordered) {
+        if (left <= 0) break;
+        const take = Math.min(num(lot.qty_remaining), left);
+        if (take <= 0) continue;
+        plan.push({
+          lot_id: lot.id,
+          batch_number: lot.batch_number,
+          expiry_date: lot.expiry_date,
+          received_at: lot.received_at,
+          qty: take,
+          unit_cost: num(lot.unit_cost),
+        });
+        left -= take;
+      }
+      return {
+        success: left <= 0,
+        preference: pref === "fefo" ? "fefo" : "fifo",
+        plan,
+        shortfall: left,
+      };
     }
 
     case "inventory.getCount": {
@@ -4701,15 +6179,56 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     case "warehouses.update": {
       const updates = { ...params };
       delete updates.id;
+      // Main Store designation only ever changes via warehouses.setMain, so the
+      // unique-per-company invariant is always enforced through one code path.
+      delete updates.is_main;
       const { data, error } = await admin.from("warehouses").update(updates).eq("id", params.id).select("*").maybeSingle();
       if (error) throw error;
       return { success: true, warehouse: data };
     }
 
     case "warehouses.delete": {
+      const { data: target } = await admin.from("warehouses").select("id,is_main").eq("id", params.id).maybeSingle();
+      if (target?.is_main) {
+        return { success: false, error: "Cannot delete the Main Store warehouse. Set another warehouse as Main Store first." };
+      }
       const { error } = await admin.from("warehouses").delete().eq("id", params.id);
       if (error) throw error;
       return { success: true };
+    }
+
+    case "warehouses.setMain": {
+      if (!isAdminLikeRole(caller.role)) {
+        return { success: false, error: "Only Owner/Admin can change the Main Store warehouse.", code: "FORBIDDEN" };
+      }
+      const warehouseId = Number(params.id);
+      if (!warehouseId) return { success: false, error: "Warehouse id is required." };
+      let wq = admin.from("warehouses").select("*").eq("id", warehouseId);
+      wq = companyFilter(wq, companyId, platform);
+      const { data: warehouse, error: findErr } = await wq.maybeSingle();
+      if (findErr) throw findErr;
+      if (!warehouse) return { success: false, error: "Warehouse not found." };
+      if (warehouse.is_main) return { success: true, warehouse };
+
+      // Unset the previous Main Store first so the partial unique index
+      // (one is_main=true row per company) is never violated mid-flight.
+      await quietSb(admin.from("warehouses").update({ is_main: false }).eq("company_id", companyId).eq("is_main", true));
+      const { data, error } = await admin
+        .from("warehouses")
+        .update({ is_main: true })
+        .eq("id", warehouseId)
+        .select("*")
+        .maybeSingle();
+      if (error) throw error;
+
+      await writeAudit(admin, {
+        companyId,
+        caller,
+        action: "set_main_warehouse",
+        module: "inventory",
+        details: { id: warehouseId, name: warehouse.name, previous_main_id: null },
+      });
+      return { success: true, warehouse: data };
     }
 
     case "currency.list": {
@@ -5048,19 +6567,23 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "settings.getAll": {
+      if (companyId == null || companyId === "") {
+        // Never return legacy global public.settings (Super Owner / seed identity).
+        return {};
+      }
       const { data, error } = await admin
         .from("company_settings")
         .select("settings")
         .eq("company_id", companyId)
         .maybeSingle();
-      if (!error && data?.settings) return data.settings;
-      const { data: legacy, error: legacyError } = await admin.from("settings").select("key,value");
-      if (legacyError && !isMissingTableError(legacyError)) throw legacyError;
-      const map = {};
-      (legacy || []).forEach((row) => {
-        map[row.key] = row.value;
-      });
-      return map;
+      if (error && !isMissingTableError(error)) throw error;
+      if (data?.settings && typeof data.settings === "object") return data.settings;
+      const { data: company } = await admin
+        .from("companies")
+        .select("name,phone,address,currency,currency_symbol,locale,country,country_code")
+        .eq("id", companyId)
+        .maybeSingle();
+      return tenantSettingsDefaults(company);
     }
 
     case "settings.getPublic": {
@@ -5072,9 +6595,13 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         activeCurrencies = [];
       }
       return {
-        store_name: all.store_name || "Nexora POS Enterprise",
+        store_name: all.store_name || "",
         currency: all.currency || all.base_currency_code || "KES",
-        currency_symbol: all.currency_symbol || "Ksh",
+        currency_code: all.currency_code || all.currency || all.base_currency_code || "KES",
+        currency_symbol: all.currency_symbol || catalogEntry(all.currency || all.base_currency_code || "KES").symbol,
+        locale: all.locale || catalogEntry(all.currency || all.base_currency_code || "KES").locale || "en-KE",
+        country: all.country || "Kenya",
+        country_code: all.country_code || "",
         enable_multi_currency: all.enable_multi_currency ?? "true",
         admin_can_edit_rates: all.admin_can_edit_rates ?? "false",
         report_currency: all.report_currency || all.currency || "KES",
@@ -5084,20 +6611,87 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "settings.update": {
+      if (!platform && !isUserManagerRole(caller.role)) {
+        return { success: false, error: "Only Owner or Admin can update company settings.", code: "FORBIDDEN" };
+      }
+      if (!companyId && !platform) {
+        return { success: false, error: "Company context required.", code: "FORBIDDEN" };
+      }
       const { data: existing } = await admin
         .from("company_settings")
         .select("settings")
         .eq("company_id", companyId)
         .maybeSingle();
       const next = { ...(existing?.settings || {}), ...(params || {}) };
+
+      // Normalize company money profile (display only — never rewrite historical amounts)
+      if (next.currency || next.currency_code || next.country || next.country_code) {
+        const money = resolveMoneyProfile({
+          country: next.country,
+          country_code: next.country_code,
+          currency: next.currency,
+          currency_code: next.currency_code,
+          currency_symbol: next.currency_symbol,
+          locale: next.locale,
+        });
+        next.country = money.country;
+        next.country_code = money.country_code;
+        next.currency = money.currency_code;
+        next.currency_code = money.currency_code;
+        next.currency_symbol = money.currency_symbol;
+        next.locale = money.locale;
+        next.base_currency_code = next.base_currency_code || money.currency_code;
+        next.report_currency = next.report_currency || money.currency_code;
+
+        try {
+          await admin
+            .from("companies")
+            .update({
+              country: money.country,
+              currency: money.currency_code,
+              currency_symbol: money.currency_symbol,
+              locale: money.locale,
+            })
+            .eq("id", companyId);
+        } catch (companyUpdateErr) {
+          // Fallback without optional columns
+          try {
+            await admin
+              .from("companies")
+              .update({ country: money.country, currency: money.currency_code })
+              .eq("id", companyId);
+          } catch {
+            console.warn("[settings.update] company money profile sync skipped", companyUpdateErr?.message);
+          }
+        }
+
+        try {
+          const catalog = catalogEntry(money.currency_code);
+          await admin.from("company_currencies").upsert(
+            {
+              company_id: companyId,
+              code: money.currency_code,
+              name: catalog.name,
+              symbol: money.currency_symbol,
+              exchange_rate_to_base: 1,
+              is_base: true,
+              is_default: true,
+              is_active: true,
+            },
+            { onConflict: "company_id,code" }
+          );
+        } catch {
+          /* optional */
+        }
+      }
+
       const { error } = await admin
         .from("company_settings")
         .upsert({ company_id: companyId, settings: next, updated_at: new Date().toISOString() }, { onConflict: "company_id" });
       if (error && isMissingTableError(error)) {
-        for (const [key, value] of Object.entries(params || {})) {
-          await admin.from("settings").upsert({ key, value: String(value) }, { onConflict: "key" });
-        }
-        return { success: true };
+        // Do NOT write to legacy global public.settings — that would overwrite
+        // Super Owner / shared identity for every tenant.
+        return { success: false, error: "Company settings storage is unavailable.", code: "CONFIG" };
       }
       if (error) throw error;
       return { success: true, settings: next };
@@ -5171,6 +6765,95 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     case "reports.getCategorySales": {
       const categories = await handlePosAction(admin, caller, "categories.getAll", params);
       return categories.map((c) => ({ name: c.name, value: 15000 + Number(c.id || 0) * 5000 }));
+    }
+
+    case "dashboard.getExtendedStats": {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const trendStartDate = new Date();
+      trendStartDate.setMonth(trendStartDate.getMonth() - 5);
+      trendStartDate.setDate(1);
+      const trendStart = trendStartDate.toISOString().slice(0, 10);
+
+      let purchasesTodayQ = admin
+        .from("purchases")
+        .select("total,created_at")
+        .gte("created_at", `${todayStr}T00:00:00`)
+        .lte("created_at", `${todayStr}T23:59:59.999`);
+      purchasesTodayQ = companyFilter(purchasesTodayQ, companyId, platform);
+
+      let purchasesTrendQ = admin
+        .from("purchases")
+        .select("total,created_at,supplier_id")
+        .gte("created_at", `${trendStart}T00:00:00`)
+        .limit(DEFAULT_LIST_CAP);
+      purchasesTrendQ = companyFilter(purchasesTrendQ, companyId, platform);
+
+      const [purchasesTodayRes, purchasesTrendRes, productsRows, suppliersRows, customersRows] = await Promise.all([
+        Promise.resolve(purchasesTodayQ).catch(() => ({ data: [] })),
+        Promise.resolve(purchasesTrendQ).catch(() => ({ data: [] })),
+        listScoped(admin, "products", { ...caller, company_id: companyId }, "id,stock,cost,avg_cost,archived_at,deleted_at", {
+          softCap: DEFAULT_LIST_CAP,
+        }).catch(() => []),
+        listScoped(admin, "suppliers", { ...caller, company_id: companyId }, "id,name,balance,deleted_at", {
+          softCap: DEFAULT_LIST_CAP,
+        }).catch(() => []),
+        listScoped(admin, "customers", { ...caller, company_id: companyId }, "id,name,balance,spent", {
+          softCap: DEFAULT_LIST_CAP,
+        }).catch(() => []),
+      ]);
+
+      const purchasesToday = (purchasesTodayRes?.data || []).reduce((sum, p) => sum + num(p.total), 0);
+
+      const activeProducts = (productsRows || []).filter((p) => !p.deleted_at);
+      const inventoryValue = activeProducts.reduce(
+        (sum, p) => sum + num(p.stock) * num(p.avg_cost != null ? p.avg_cost : p.cost),
+        0
+      );
+      const outOfStock = activeProducts.filter((p) => num(p.stock) <= 0).length;
+
+      const activeSuppliers = (suppliersRows || []).filter((s) => !s.deleted_at);
+      const outstandingPayables = activeSuppliers.reduce((sum, s) => sum + Math.max(0, num(s.balance)), 0);
+
+      const outstandingReceivables = (customersRows || []).reduce((sum, c) => sum + Math.max(0, num(c.balance)), 0);
+      const topCustomers = [...(customersRows || [])]
+        .sort((a, b) => num(b.spent) - num(a.spent))
+        .slice(0, 5)
+        .filter((c) => num(c.spent) > 0)
+        .map((c) => ({ id: c.id, name: c.name, revenue: num(c.spent) }));
+
+      const supplierById = new Map(activeSuppliers.map((s) => [Number(s.id), s]));
+      const purchaseTotalsBySupplier = new Map();
+      const monthlyPurchases = new Map();
+      for (const row of purchasesTrendRes?.data || []) {
+        const supplierId = Number(row.supplier_id);
+        if (supplierId) {
+          purchaseTotalsBySupplier.set(supplierId, (purchaseTotalsBySupplier.get(supplierId) || 0) + num(row.total));
+        }
+        const monthKey = String(row.created_at || "").slice(0, 7);
+        if (monthKey) monthlyPurchases.set(monthKey, (monthlyPurchases.get(monthKey) || 0) + num(row.total));
+      }
+      const topSuppliers = [...purchaseTotalsBySupplier.entries()]
+        .map(([id, total]) => ({ id, name: supplierById.get(id)?.name || `Supplier #${id}`, total }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 5);
+
+      const monthlyPurchasesTrend = [...monthlyPurchases.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([month, total]) => ({ month, total }));
+
+      return {
+        success: true,
+        purchases_today: purchasesToday,
+        inventory_value: inventoryValue,
+        total_products: activeProducts.length,
+        out_of_stock: outOfStock,
+        total_suppliers: activeSuppliers.length,
+        outstanding_receivables: outstandingReceivables,
+        outstanding_payables: outstandingPayables,
+        top_customers: topCustomers,
+        top_suppliers: topSuppliers,
+        monthly_purchases: monthlyPurchasesTrend,
+      };
     }
 
     case "reports.getAnalytics": {
@@ -5532,11 +7215,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         .eq("company_id", companyId)
         .maybeSingle();
       if (error && isMissingTableError(error)) {
-        const plan = getPlanByCode("enterprise");
+        const plan = getPlanByCode("free_trial");
         return {
           plan: plan.name,
           plan_code: plan.code,
-          status: "active",
+          status: "trialing",
           company_id: companyId,
           limits: plan.limits,
           currency: BILLING_CURRENCY,
@@ -5544,8 +7227,15 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       }
       if (error) throw error;
       if (!data) {
-        const plan = getPlanByCode("enterprise");
-        return { plan_code: plan.code, plan: plan.name, status: "active", company_id: companyId, limits: plan.limits };
+        const plan = getPlanByCode("free_trial");
+        return {
+          plan_code: plan.code,
+          plan: plan.name,
+          status: "trialing",
+          company_id: companyId,
+          limits: plan.limits,
+          currency: BILLING_CURRENCY,
+        };
       }
       const plan = getPlanByCode(data.plan_code);
       return {

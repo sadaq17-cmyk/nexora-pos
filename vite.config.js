@@ -18,6 +18,16 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Optional: local UI against production /api (set VITE_PROXY_API=1).
+    proxy: process.env.VITE_PROXY_API === "1"
+      ? {
+          "/api": {
+            target: process.env.VITE_PROXY_API_TARGET || "https://www.nexorapospro.com",
+            changeOrigin: true,
+            secure: true,
+          },
+        }
+      : undefined,
   },
   build: {
     outDir: "dist",

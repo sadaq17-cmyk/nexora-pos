@@ -1,9 +1,11 @@
 ﻿/**
- * Complete production E2E for Platform Super Admin on https://www.httpsnexorapos.com
+ * Complete production E2E for Platform Super Admin on https://www.nexorapospro.com
  */
 import { chromium } from "playwright";
+import { assertNotProduction } from "./_prodSafety.mjs";
 
-const BASE = process.env.E2E_BASE_URL || "https://www.httpsnexorapos.com";
+const BASE = process.env.E2E_BASE_URL || "https://www.nexorapospro.com";
+assertNotProduction(BASE, { scriptName: "e2e-platform-super-admin.mjs" });
 const PLATFORM_USER = "SuperAdmin";
 const PLATFORM_PASS = "Honest@26";
 const NEW_PASS = `Honest@26!E2E${Date.now().toString().slice(-4)}`;
@@ -117,8 +119,8 @@ try {
   if (await page.locator('input[type="email"]').count()) pass("forgot_password_page");
   else fail("forgot_password_page");
 
-  // Absolute assets on nested route
-  await page.goto(`${BASE}/platform/users`, { waitUntil: "domcontentloaded" });
+  // Absolute assets on nested route (legacy /platform/users redirects to companies)
+  await page.goto(`${BASE}/platform/companies`, { waitUntil: "domcontentloaded" });
   const assetOk = await page.evaluate(() => {
     const s = document.querySelector('script[type="module"]');
     return s && String(s.src || "").includes("/assets/");
@@ -139,20 +141,20 @@ try {
   if (/\/platform/i.test(page.url())) pass("platform_dashboard_access", page.url());
   else fail("platform_dashboard_access", page.url());
 
-  // All platform modules
+  // All platform modules (Company Management replaces legacy platform Users)
   const modules = [
     ["/platform", /Platform Dashboard|Companies|Collected/i],
-    ["/platform/companies", /Companies|Create company/i],
-    ["/platform/users", /Reset password|Toggle status|Login as/i],
+    ["/platform/companies", /Company Management|Create company|Mark as Paid|Login as Company Owner/i],
+    ["/platform/users", /Company Management|Create company|Mark as Paid/i], // redirect target
     ["/platform/subscriptions", /Suspend|Renew|Expire|Assign/i],
-    ["/platform/pricing", /Pricing|Package|Feature/i],
-    ["/platform/branches", /Branch/i],
-    ["/platform/roles", /Role|Platform Super Admin/i],
-    ["/platform/backup", /Backup|Restore/i],
-    ["/platform/search", /Search|Global/i],
+    ["/platform/pricing", /Pricing|Package|Feature|Plans/i],
+    ["/platform/branches", /Company Management|Create company/i], // redirect → companies
+    ["/platform/roles", /Settings|SaaS|Platform/i], // redirect → settings
+    ["/platform/backup", /Settings|SaaS|Platform/i], // redirect → settings
+    ["/platform/search", /Company Management|Create company/i], // redirect → companies
     ["/platform/payments", /Payment|Amount|Billing/i],
-    ["/platform/analytics", /Analytics|Companies/i],
-    ["/platform/domains", /Domain/i],
+    ["/platform/analytics", /Analytics|Companies|Reports/i],
+    ["/platform/domains", /Settings|SaaS|Platform/i], // redirect → settings
     ["/platform/settings", /Settings|verified domains|SaaS/i],
     ["/platform/audit", /Audit/i],
   ];
@@ -174,23 +176,25 @@ try {
     else fail(key, `${page.url()} ${body.replace(/\s+/g, " ").slice(0, 180)}`);
   }
 
-  // Nav permissions
+  // Nav permissions — Super Owner menu (no tenant Users; Company Management instead)
   const nav = await page.locator("nav, aside").first().innerText().catch(() => "");
-  const wanted = ["Companies", "Users", "Subscriptions", "Branch", "Role", "Backup", "Search", "Audit", "Settings", "Payments"];
+  const wanted = ["Company Management", "Subscriptions", "Payments", "Plans", "Reports", "Support", "AI Guardian", "Audit", "Settings"];
   const found = wanted.filter((w) => new RegExp(w, "i").test(nav));
-  if (found.length >= 9) pass("platform_nav_permissions", found.join(", "));
-  else fail("platform_nav_permissions", found.join(", "));
+  const hasLegacyUsersMenu = /\bUsers\b/i.test(nav);
+  if (found.length >= 7 && /Company Management/i.test(nav) && !hasLegacyUsersMenu) {
+    pass("platform_nav_permissions", found.join(", "));
+  } else {
+    fail("platform_nav_permissions", `found=${found.join(", ")} hasUsers=${hasLegacyUsersMenu} nav=${nav.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
 
-  // Impersonate button (Login as owner)
-  await page.goto(`${BASE}/platform/users`, { waitUntil: "domcontentloaded" });
+  // Impersonate button lives on Company Management (login as company owner)
+  await page.goto(`${BASE}/platform/companies`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(3500);
-  await page.locator('select').nth(1).selectOption("owner").catch(() => {});
-  await page.waitForTimeout(500);
-  const usersBody = await page.locator("body").innerText();
-  const loginAsBtn = page.locator('[data-testid="login-as-owner"], button:has-text("Login as owner"), button:has-text("Login as user")').first();
+  const companiesBody = await page.locator("body").innerText();
+  const loginAsBtn = page.locator('[data-testid="login-as-owner"], button:has-text("Login as Company Owner"), button:has-text("Login as owner")').first();
   const hasBtn = (await loginAsBtn.count()) > 0 && (await loginAsBtn.isVisible().catch(() => false));
-  if (hasBtn || /Login as owner|Login as user/i.test(usersBody)) pass("impersonate_button_present");
-  else fail("impersonate_button_present", usersBody.replace(/\s+/g, " ").slice(0, 400));
+  if (hasBtn || /Login as Company Owner|Login as owner/i.test(companiesBody)) pass("impersonate_button_present");
+  else fail("impersonate_button_present", companiesBody.replace(/\s+/g, " ").slice(0, 400));
 
   // Exercise impersonation if button exists
   if (hasBtn) {
@@ -252,11 +256,13 @@ try {
     else fail("company_owner_create_ui", "form not visible");
   } else fail("company_owner_create_ui", "no create button");
 
-  // Password reset UI (admin reset on users)
-  await page.goto(`${BASE}/platform/users`, { waitUntil: "domcontentloaded" });
+  // Company Management quick actions (replaces legacy platform user admin UI)
+  await page.goto(`${BASE}/platform/companies`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(2500);
-  if (/Reset password/i.test(await page.locator("body").innerText())) pass("admin_password_reset_ui");
-  else fail("admin_password_reset_ui");
+  const cmBody = await page.locator("body").innerText();
+  if (/Mark as Paid/i.test(cmBody) && /Extend Trial|Extend Subscription/i.test(cmBody) && /Activate|Suspend/i.test(cmBody)) {
+    pass("company_management_actions_ui");
+  } else fail("company_management_actions_ui", cmBody.replace(/\s+/g, " ").slice(0, 240));
 
   // Change password self-service
   await page.goto(`${BASE}/change-password`, { waitUntil: "domcontentloaded" });
@@ -264,15 +270,8 @@ try {
   if (/Change password/i.test(await page.locator("body").innerText())) pass("change_password_page");
   else fail("change_password_page");
 
-  // Toggle user status (CRUD-ish)
-  await page.goto(`${BASE}/platform/users`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(2500);
-  const toggle = page.locator('button:has-text("Toggle status")').first();
-  if (await toggle.count()) {
-    await toggle.click();
-    await page.waitForTimeout(2500);
-    pass("user_toggle_status_crud");
-  } else fail("user_toggle_status_crud", "no toggle");
+  // Tenant staff Users module remains available after impersonation / company owner login
+  // (exercised below under company_owner_users_create — not on Super Owner nav)
 
   // Company owner login still works
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });

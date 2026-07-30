@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Activity, Building2, CircleDollarSign, CreditCard, Globe2, Plus,
-  Search, Settings2, ShieldCheck, Users,
+  Activity, Building2, CircleDollarSign, CreditCard, Globe2,
+  Settings2, ShieldCheck, Users,
 } from "lucide-react";
 import { Navigate, useLocation } from "react-router-dom";
-import CompanyAccountForm from "../components/CompanyAccountForm";
+import CompanyManagementPanel from "../components/CompanyManagementPanel";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { api } from "../lib/api";
-import { isPlatformOwner, normalizeRole, SYSTEM_ROLES } from "../lib/rbac";
+import { isPlatformOwner } from "../lib/rbac";
 import { formatLimit, isContactSalesPlan, planPriceLabel } from "../lib/saasPlans";
+import { SUPPORT_EMAIL, SUPPORT_MAILTO } from "../lib/supportContact";
 
 const ROUTE_MODULES = {
   "/platform": "dashboard",
@@ -17,16 +18,12 @@ const ROUTE_MODULES = {
   "/platform/companies": "companies",
   "/platform/subscriptions": "subscriptions",
   "/platform/pricing": "pricing",
-  "/platform/users": "users",
   "/platform/payments": "payments",
   "/platform/analytics": "analytics",
-  "/platform/domains": "domains",
+  "/platform/support": "support",
+  "/platform/ai-guardian": "ai_guardian",
   "/platform/settings": "settings",
   "/platform/audit": "audit",
-  "/platform/branches": "branches",
-  "/platform/roles": "roles",
-  "/platform/backup": "backup",
-  "/platform/search": "search",
 };
 
 const fmt = (value) => (value ? new Date(value).toLocaleString() : "—");
@@ -41,9 +38,6 @@ export default function OwnerManagement() {
   const [consoleData, setConsoleData] = useState({ subscriptions: [], plans: [], domains: [], billing: [], audit: [], analytics: {}, platformSettings: {}, features: [], companyFeatureOverrides: [] });
   const [search, setSearch] = useState("");
   const [companyStatus, setCompanyStatus] = useState("");
-  const [userCompany, setUserCompany] = useState("");
-  const [userRole, setUserRole] = useState("");
-  const [userStatus, setUserStatus] = useState("");
   const [showCreateCompany, setShowCreateCompany] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -65,18 +59,13 @@ export default function OwnerManagement() {
     [overview.companies]
   );
   const filteredCompanies = useMemo(
-    () => overview.companies.filter((company) => !companyStatus || company.status === companyStatus),
+    () => overview.companies.filter((company) => {
+      if (!companyStatus) return true;
+      const ds = company.display_status || company.status;
+      return ds === companyStatus || company.status === companyStatus;
+    }),
     [overview.companies, companyStatus]
   );
-  const filteredUsers = useMemo(
-    () => overview.users.filter((member) =>
-      (!userCompany || String(member.company_id) === String(userCompany))
-      && (!userRole || normalizeRole(member.role) === userRole)
-      && (!userStatus || (userStatus === "active") === !!member.active)
-    ),
-    [overview.users, userCompany, userRole, userStatus]
-  );
-
   if (!isPlatformOwner(user?.role)) return <Navigate to="/dashboard" replace />;
 
   const act = async (promise, message) => {
@@ -102,7 +91,7 @@ export default function OwnerManagement() {
       {loading && <div className="card p-10 text-center text-sm text-app-muted">Loading platform data…</div>}
       {!loading && module === "dashboard" && <PlatformDashboard overview={overview} data={consoleData} companyMap={companyMap} />}
       {!loading && module === "companies" && (
-        <Companies
+        <CompanyManagementPanel
           companies={filteredCompanies}
           users={overview.users}
           status={companyStatus}
@@ -119,76 +108,131 @@ export default function OwnerManagement() {
       )}
       {!loading && module === "subscriptions" && <Subscriptions rows={consoleData.subscriptions} plans={consoleData.plans} companyMap={companyMap} act={act} />}
       {!loading && module === "pricing" && <PricingPackages data={consoleData} companies={overview.companies} act={act} />}
-      {!loading && module === "users" && (
-        <PlatformUsers
-          rows={filteredUsers}
-          companies={overview.companies}
-          companyMap={companyMap}
-          filters={{ userCompany, userRole, userStatus }}
-          setters={{ setUserCompany, setUserRole, setUserStatus }}
-          act={act}
-          showToast={showToast}
-        />
-      )}
       {!loading && module === "payments" && <Payments rows={consoleData.billing} companyMap={companyMap} />}
       {!loading && module === "analytics" && <Analytics data={consoleData.analytics} plans={consoleData.plans} subscriptions={consoleData.subscriptions} billing={consoleData.billing} />}
-      {!loading && module === "domains" && <Domains rows={consoleData.domains} companies={overview.companies} companyMap={companyMap} act={act} />}
+      {!loading && module === "support" && <PlatformSupport />}
+      {!loading && module === "ai_guardian" && <PlatformAiGuardian />}
       {!loading && module === "settings" && <PlatformSettings settings={consoleData.platformSettings} act={act} />}
       {!loading && module === "audit" && <Audit rows={consoleData.audit} companies={overview.companies} companyMap={companyMap} />}
-      {!loading && module === "branches" && <BranchManagement branches={overview.branches} companyMap={companyMap} />}
-      {!loading && module === "roles" && <PlatformRoles />}
-      {!loading && module === "backup" && <PlatformBackup act={act} showToast={showToast} />}
-      {!loading && module === "search" && (
-        <GlobalSearch overview={overview} companyMap={companyMap} search={search} setSearch={setSearch} />
-      )}
     </div>
   );
 }
 
 function titleFor(module) {
   return ({
-    dashboard: "Platform Dashboard", companies: "Companies", subscriptions: "Subscriptions",
-    pricing: "Pricing Packages", users: "Users", payments: "Payments", analytics: "Analytics",
-    domains: "Domains", settings: "Settings", audit: "Audit Logs",
-    branches: "Branch Management", roles: "Role & Permissions", backup: "Backup & Restore", search: "Global Search",
+    dashboard: "Platform Dashboard",
+    companies: "Company Management",
+    subscriptions: "Subscriptions",
+    pricing: "Plans",
+    payments: "Payments",
+    analytics: "Reports",
+    support: "Support",
+    ai_guardian: "AI Guardian",
+    settings: "Settings",
+    audit: "Audit Logs",
   })[module];
 }
 
-function PlatformDashboard({ overview, data, companyMap }) {
-  const revenueByCurrency = (data.billing || []).filter((row) => row.status === "paid").reduce((totals, row) => {
-    const currency = row.currency || "USD";
-    totals[currency] = (totals[currency] || 0) + Number(row.amount || 0);
-    return totals;
-  }, {});
-  const kpis = [
-    [Building2, "Companies", overview.stats.companies || 0],
-    [Users, "Company users", overview.stats.users || 0],
-    [CreditCard, "Active subscriptions", data.analytics.subscriptions_by_status?.active || 0],
-    [Activity, "Trials", data.analytics.subscriptions_by_status?.trialing || 0],
-    [CircleDollarSign, "Collected revenue", Object.entries(revenueByCurrency).map(([currency, amount]) => `${currency} ${amount.toLocaleString()}`).join(" · ") || "No payments"],
-  ];
-  return <div className="space-y-5">
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">{kpis.map(([Icon, label, value]) => <div key={label} className="nx-kpi"><Icon size={20} className="mb-4 text-brand" /><div className="nx-kpi-value">{value}</div><div className="nx-kpi-label">{label}</div></div>)}</div>
-    <div className="grid gap-5 xl:grid-cols-2">
-      <DataTable headings={["Company", "Status", "Plan", "Users"]}>{overview.companies.slice(0, 8).map((company) => <tr key={company.id} className="border-t border-app"><Cell>{company.name}</Cell><Cell className="capitalize">{statusLabel(company.status)}</Cell><Cell>{company.subscription_plan}</Cell><Cell>{company.user_count}</Cell></tr>)}</DataTable>
-      <DataTable headings={["Time", "Actor", "Activity", "Company"]}>{data.audit.slice(0, 8).map((row) => <tr key={row.id} className="border-t border-app"><Cell className="text-xs">{fmt(row.created_at)}</Cell><Cell>{row.user_name || "System"}</Cell><Cell className="capitalize">{statusLabel(row.action)}</Cell><Cell>{companyMap[row.company_id]?.name || "Platform"}</Cell></tr>)}</DataTable>
-    </div>
-  </div>;
+function displayStatus(company) {
+  return company.display_status || company.status || "unknown";
 }
 
-function Companies({ companies, users, status, setStatus, search, setSearch, showCreate, setShowCreate, plans, load, act, showToast }) {
-  return <div className="space-y-4">
-    <div className="card flex flex-wrap gap-3 p-4">
-      <div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-3 text-app-muted" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search companies or owners…" className="form-control min-h-10 w-full rounded-xl border pl-9 pr-3 text-sm" /></div>
-      <select value={status} onChange={(e) => setStatus(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm"><option value="">All statuses</option><option value="active">Active</option><option value="pending_verification">Pending verification</option><option value="inactive">Inactive</option></select>
-      <button className="btn btn-primary inline-flex items-center gap-2" onClick={() => setShowCreate((value) => !value)}><Plus size={15} />Create company</button>
+function statusBadgeClass(status) {
+  const s = String(status || "").toLowerCase();
+  if (s === "active") return "bg-emerald-100 text-emerald-800";
+  if (s === "suspended" || s === "locked") return "bg-amber-100 text-amber-900";
+  if (s === "expired") return "bg-orange-100 text-orange-900";
+  if (s === "disabled" || s === "cancelled" || s === "inactive") return "bg-slate-200 text-slate-800";
+  return "bg-sky-100 text-sky-800";
+}
+
+function PlatformDashboard({ overview, data, companyMap }) {
+  const analytics = data.analytics || {};
+  const currency = analytics.revenue_currency || "KES";
+  const kpis = [
+    [Building2, "Total companies", overview.stats.companies || 0],
+    [Building2, "Active companies", overview.stats.active_companies || analytics.active_companies || 0],
+    [CircleDollarSign, "Monthly revenue*", `${currency} ${Number(analytics.monthly_revenue || 0).toLocaleString()}`],
+    [CircleDollarSign, "Total revenue*", `${currency} ${Number(analytics.total_revenue || 0).toLocaleString()}`],
+    [Users, "Active users", overview.stats.active_users || analytics.active_users || 0],
+    [Activity, "AI usage", analytics.ai_usage_label || "Not metered"],
+    [Activity, "SMS usage", analytics.sms_usage_label || "Not metered"],
+    [Activity, "Storage usage", analytics.storage_usage_label || "Not metered"],
+    [ShieldCheck, "System health", analytics.system_health || "ok"],
+    [CreditCard, "Active subscriptions", analytics.subscriptions_by_status?.active || 0],
+  ];
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        {kpis.map(([Icon, label, value]) => (
+          <div key={label} className="nx-kpi">
+            <Icon size={20} className="mb-4 text-brand" />
+            <div className="nx-kpi-value text-lg">{value}</div>
+            <div className="nx-kpi-label">{label}</div>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-app-muted">
+        * Monthly revenue is estimated from active paid plan prices. Total revenue uses recorded tenant sales totals (mixed currencies possible). AI / SMS / Storage are not metered in the current schema.
+      </p>
+      <div className="grid gap-5 xl:grid-cols-2">
+        <DataTable headings={["Company", "Owner", "Status", "Plan", "Users", "Expiry"]}>
+          {overview.companies.slice(0, 10).map((company) => (
+            <tr key={company.id} className="border-t border-app">
+              <Cell>{company.name}<div className="text-xs text-app-muted">{company.country} · {company.currency}</div></Cell>
+              <Cell>{company.owner_name || "—"}<div className="text-xs text-app-muted">{company.owner_email}</div></Cell>
+              <Cell><span className={`rounded-full px-2 py-0.5 text-xs capitalize ${statusBadgeClass(displayStatus(company))}`}>{statusLabel(displayStatus(company))}</span></Cell>
+              <Cell>{company.subscription_plan}</Cell>
+              <Cell>{company.user_count}</Cell>
+              <Cell className="text-xs">{fmt(company.expiry_date || company.expires_at)}</Cell>
+            </tr>
+          ))}
+        </DataTable>
+        <div className="space-y-4">
+          <DataTable headings={["Time", "Actor", "Activity", "Company"]}>
+            {(data.audit || []).slice(0, 10).map((row) => (
+              <tr key={row.id || `${row.created_at}-${row.action}`} className="border-t border-app">
+                <Cell className="text-xs">{fmt(row.created_at)}</Cell>
+                <Cell>{row.user_name || "System"}</Cell>
+                <Cell className="capitalize">{statusLabel(row.action)}</Cell>
+                <Cell>{companyMap[row.company_id]?.name || "Platform"}</Cell>
+              </tr>
+            ))}
+          </DataTable>
+          <div className="card p-4 text-sm text-app-muted">
+            Audit logs: {(data.audit || []).length} recent platform/tenant events · Health: <strong className="text-app">{analytics.system_health || "ok"}</strong>
+          </div>
+        </div>
+      </div>
     </div>
-    {showCreate && <CompanyAccountForm plans={plans} onCreated={(result) => { showToast(`Company ${result.company_code} created`); setShowCreate(false); load(); }} />}
-    <DataTable headings={["Company", "Code / Contact", "Plan", "Users / Branches", "Owner", "Status", "Actions"]}>{companies.map((company) => {
-      const owner = users.find((member) => Number(member.id) === Number(company.owner_user_id));
-      return <tr key={company.id} className="border-t border-app"><Cell><strong>{company.name}</strong><div className="text-xs text-app-muted">{company.business_type} · {company.country}</div></Cell><Cell><span className="rounded bg-app px-2 py-1 font-mono text-xs">{company.code}</span><div className="mt-1 text-xs text-app-muted">{company.email || "No email"}</div></Cell><Cell>{company.subscription_plan}</Cell><Cell>{company.user_count} / {company.branch_count}</Cell><Cell>{owner?.name || "—"}<div className="text-xs text-app-muted">{owner?.email}</div></Cell><Cell className="capitalize">{statusLabel(company.status)}</Cell><Cell><div className="flex gap-2"><button className="rounded-lg border border-app px-2.5 py-1.5 text-xs" onClick={() => { const name = prompt("Company name", company.name); if (name) act(api.owner.updateCompany(company.id, { name }), "Company updated"); }}>Edit</button><button className="rounded-lg border border-app px-2.5 py-1.5 text-xs" onClick={() => confirm(`${company.status === "active" ? "Deactivate" : "Activate"} ${company.name}?`) && act(api.owner.updateCompany(company.id, { status: company.status === "active" ? "inactive" : "active" }), "Company status updated")}>{company.status === "active" ? "Deactivate" : "Activate"}</button></div></Cell></tr>;
-    })}</DataTable>
-  </div>;
+  );
+}
+
+function PlatformSupport() {
+  return (
+    <div className="card max-w-2xl space-y-3 p-6">
+      <h2 className="text-lg font-semibold">Platform Support</h2>
+      <p className="text-sm text-app-muted">
+        Customer and tenant support for Nexora POS Pro. Use Company Management to inspect a single tenant without crossing company boundaries.
+      </p>
+      <p className="text-sm">
+        Support inbox:{" "}
+        <a className="font-semibold text-brand underline" href={SUPPORT_MAILTO}>{SUPPORT_EMAIL}</a>
+      </p>
+    </div>
+  );
+}
+
+function PlatformAiGuardian() {
+  return (
+    <div className="card max-w-2xl space-y-3 p-6">
+      <h2 className="text-lg font-semibold">AI Guardian</h2>
+      <p className="text-sm text-app-muted">
+        Platform-level AI oversight for anomaly review and tenant health signals. Open the Nexora AI assistant from the sidebar for interactive guidance.
+        Tenant data is never mixed — always operate in one company context at a time (or use Login as Company Owner).
+      </p>
+    </div>
+  );
 }
 
 function Subscriptions({ rows, plans, companyMap, act }) {
@@ -203,35 +247,6 @@ function PricingPackages({ data, companies, act }) {
   </div>;
 }
 
-function PlatformUsers({ rows, companies, companyMap, filters, setters, act, showToast }) {
-  const { impersonate } = useAuth();
-  const resetPassword = (member) => {
-    const password = prompt(`Enter a new password (at least 8 characters) for ${member.name}:`);
-    if (password === null) return;
-    const confirmation = prompt("Confirm the new password:");
-    if (confirmation !== password) return showToast("Passwords do not match");
-    act(api.auth_admin.resetPassword(member.id, password), "Password reset");
-  };
-  const canImpersonate = (member) => {
-    const role = normalizeRole(member.role);
-    if (role === "platform_owner") return false;
-    // Prefer company owners; also allow any active tenant user with a real Auth id (UUID).
-    const hasAuthId = typeof member.id === "string" && member.id.includes("-");
-    return hasAuthId && (role === "owner" || role === "super_admin" || role === "admin");
-  };
-  const loginAsOwner = async (member) => {
-    if (!confirm(`Log in as ${member.name}? You will enter their company workspace.`)) return;
-    if (api.owner?.recordAudit) {
-      await api.owner.recordAudit("impersonate_owner", { target_user_id: member.id, company_id: member.company_id });
-    }
-    const result = await impersonate(member.id);
-    if (!result.success) return showToast(result.error || "Impersonation failed");
-    showToast(`Now viewing as ${member.name}`);
-    window.location.assign("/dashboard");
-  };
-  return <div className="space-y-4"><div className="card flex flex-wrap gap-3 p-4"><select value={filters.userCompany} onChange={(e) => setters.setUserCompany(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm"><option value="">All companies</option>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select><select value={filters.userRole} onChange={(e) => setters.setUserRole(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm"><option value="">All roles</option><option value="owner">Company Owners</option><option value="super_admin">Super Admins</option><option value="admin">Admins</option><option value="cashier">Cashiers</option></select><select value={filters.userStatus} onChange={(e) => setters.setUserStatus(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm"><option value="">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select></div><DataTable headings={["Name", "Email", "Type / Role", "Company", "Status", "Last login", "Action"]}>{rows.map((member) => <tr key={member.id} className="border-t border-app"><Cell>{member.name}<div className="text-xs text-app-muted">@{member.username}</div></Cell><Cell>{member.email}</Cell><Cell>{normalizeRole(member.role) === "owner" ? <strong>Company Owner</strong> : statusLabel(member.role)}</Cell><Cell>{companyMap[member.company_id]?.name || "—"}</Cell><Cell>{member.active ? "Active" : "Inactive"}</Cell><Cell className="text-xs">{fmt(member.last_login_at)}</Cell><Cell><div className="flex flex-wrap gap-1.5">{canImpersonate(member) && <button type="button" data-testid="login-as-owner" className="rounded-lg border border-brand px-2 py-1 text-xs text-brand" onClick={() => loginAsOwner(member)}>{normalizeRole(member.role) === "owner" ? "Login as owner" : "Login as user"}</button>}<button type="button" className="rounded-lg border border-app px-2 py-1 text-xs" onClick={() => confirm(`${member.active ? "Deactivate" : "Activate"} this user?`) && act(api.auth_admin.setUserActive(member.id, !member.active), "User status updated")}>Toggle status</button><button type="button" className="rounded-lg border border-app px-2 py-1 text-xs" onClick={() => resetPassword(member)}>Reset password</button></div></Cell></tr>)}</DataTable></div>;
-}
-
 function Payments({ rows, companyMap }) {
   return <DataTable headings={["Company", "Plan", "Amount", "Status", "Date", "Reference"]}>{rows.map((row) => <tr key={row.id} className="border-t border-app"><Cell>{companyMap[row.company_id]?.name || "—"}</Cell><Cell>{row.plan_code || "—"}</Cell><Cell>{row.currency || "USD"} {Number(row.amount || 0).toLocaleString()}</Cell><Cell className="capitalize">{row.status}</Cell><Cell>{fmt(row.paid_at || row.created_at)}</Cell><Cell>{row.reference || row.invoice_no || "—"}</Cell></tr>)}</DataTable>;
 }
@@ -241,10 +256,6 @@ function Analytics({ data, plans, subscriptions, billing }) {
   const revenue = billing.filter((row) => row.status === "paid").reduce((sum, row) => sum + Number(row.amount || 0), 0);
   const cards = [[Building2, "Companies", data.companies || 0], [Users, "Users", data.users || 0], [Globe2, "Branches", data.branches || 0], [CreditCard, "Subscriptions", subscriptions.length], [CircleDollarSign, "Payment total*", revenue.toLocaleString()]];
   return <div className="space-y-6"><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">{cards.map(([Icon, label, value]) => <div key={label} className="nx-kpi"><Icon className="mb-4 text-brand" size={20} /><div className="nx-kpi-value">{value}</div><div className="nx-kpi-label">{label}</div></div>)}</div><div className="card"><h2 className="card-title">Plan distribution</h2><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{distribution.map((row) => <div key={row.name} className="rounded-xl bg-app p-4"><div className="text-xl font-bold">{row.count}</div><div className="text-xs text-app-muted">{row.name}</div></div>)}</div><p className="mt-4 text-xs text-app-muted">* Payment and sales totals are not currency-normalized. Tenant sales span {data.sales_currencies?.join(", ") || "no recorded currencies"}.</p></div></div>;
-}
-
-function Domains({ rows, companies, companyMap, act }) {
-  return <div className="space-y-4"><div className="card flex flex-wrap gap-3 p-4"><select id="domain-company" className="form-control min-h-10 rounded-xl border px-3 text-sm">{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select><input id="domain-value" placeholder="pos.example.com" className="form-control min-h-10 flex-1 rounded-xl border px-3 text-sm" /><button className="btn btn-primary inline-flex items-center gap-2" onClick={() => act(api.owner.addDomain(document.getElementById("domain-company").value, document.getElementById("domain-value").value), "Domain added as pending")}><Plus size={15} />Add domain</button></div><DataTable headings={["Company", "Domain", "Status", "Primary", "Verified", "Actions"]}>{rows.map((row) => <tr key={row.id} className="border-t border-app"><Cell>{companyMap[row.company_id]?.name}</Cell><Cell className="font-mono">{row.domain}</Cell><Cell className="capitalize">{row.status}</Cell><Cell>{row.is_primary ? "Yes" : "No"}</Cell><Cell className="text-xs">{fmt(row.verified_at)}</Cell><Cell><div className="flex gap-2">{row.status !== "verified" && <button className="rounded-lg border border-app px-2 py-1 text-xs" onClick={() => act(api.owner.verifyDomain(row.id), "Domain verified")}>Verify</button>}{row.status === "verified" && !row.is_primary && <button className="rounded-lg border border-app px-2 py-1 text-xs" onClick={() => act(api.owner.setPrimaryDomain(row.id), "Primary domain updated")}>Make primary</button>}<button className="rounded-lg border border-red-200 px-2 py-1 text-xs text-red-600" onClick={() => confirm("Remove this domain?") && act(api.owner.removeDomain(row.id), "Domain removed")}>Remove</button></div></Cell></tr>)}</DataTable></div>;
 }
 
 function PlatformSettings({ settings, act }) {
@@ -263,136 +274,6 @@ function Audit({ rows, companies, companyMap }) {
     && (!date || String(row.created_at || "").slice(0, 10) === date)
   );
   return <div className="space-y-4"><div className="card flex flex-wrap gap-3 p-4"><select value={company} onChange={(e) => setCompany(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm"><option value="">All companies</option>{companies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><input value={action} onChange={(e) => setAction(e.target.value)} placeholder="Filter action…" className="form-control min-h-10 rounded-xl border px-3 text-sm" /><input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Filter actor…" className="form-control min-h-10 rounded-xl border px-3 text-sm" /><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="form-control min-h-10 rounded-xl border px-3 text-sm" /></div><DataTable headings={["Time", "Actor", "Action", "Module", "Company", "Details"]}>{filtered.map((row) => <tr key={row.id} className="border-t border-app"><Cell className="text-xs">{fmt(row.created_at)}</Cell><Cell>{row.user_name || "System"}</Cell><Cell className="capitalize">{statusLabel(row.action)}</Cell><Cell>{row.module}</Cell><Cell>{companyMap[row.company_id]?.name || "Platform"}</Cell><Cell className="max-w-sm truncate text-xs text-app-muted">{row.details}</Cell></tr>)}</DataTable></div>;
-}
-
-function BranchManagement({ branches, companyMap }) {
-  return (
-    <DataTable headings={["Company", "Branch", "Code", "Active"]}>
-      {branches.map((branch) => (
-        <tr key={branch.id} className="border-t border-app">
-          <Cell>{companyMap[branch.company_id]?.name || branch.company_id}</Cell>
-          <Cell>{branch.name}</Cell>
-          <Cell><span className="font-mono text-xs">{branch.code || "—"}</span></Cell>
-          <Cell>{branch.active === false ? "No" : "Yes"}</Cell>
-        </tr>
-      ))}
-    </DataTable>
-  );
-}
-
-function PlatformRoles() {
-  return (
-    <div className="space-y-4">
-      <div className="card p-5">
-        <h2 className="font-semibold">Platform role hierarchy</h2>
-        <p className="mt-2 text-sm leading-6 text-app-muted">
-          Platform Super Admin sits above all tenant roles and manages companies, subscriptions, billing, and global settings.
-          Company roles (Owner, Super Admin, Admin, Cashier, etc.) are scoped per tenant — edit them from each company&apos;s Users → Roles screen.
-        </p>
-      </div>
-      <div className="card p-5">
-        <h3 className="font-semibold">System roles</h3>
-        <ul className="mt-3 space-y-2">
-          {SYSTEM_ROLES.map((role) => (
-            <li key={role.id} className="rounded-xl border border-app px-3 py-2 text-sm">
-              <strong>{role.label}</strong>
-              <span className="text-app-muted"> — {role.description}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-function PlatformBackup({ act, showToast }) {
-  const handleBackup = async () => {
-    if (typeof api.backup?.export === "function") {
-      const result = await api.backup.export();
-      showToast(result.success ? "Backup exported" : (result.error || "Backup failed"));
-      return;
-    }
-    if (typeof api.settings?.backup === "function") {
-      const result = await api.settings.backup();
-      showToast(result.success ? "Backup complete" : (result.error || "Backup failed"));
-      return;
-    }
-    await act(api.owner.updatePlatformSettings({}), "Platform backup runs per browser session — export from tenant Settings when needed");
-  };
-  const handleRestore = async () => {
-    if (typeof api.backup?.restore === "function") {
-      const result = await api.backup.restore();
-      showToast(result.success ? "Restore initiated" : (result.error || "Restore requires an import UI in the browser version."));
-      return;
-    }
-    if (typeof api.settings?.restore === "function") {
-      const result = await api.settings.restore();
-      showToast(result.success ? "Restore complete" : (result.error || "Restore failed"));
-      return;
-    }
-    showToast("Restore requires importing a backup file from tenant Settings.");
-  };
-  return (
-    <div className="space-y-4">
-      <div className="card p-5">
-        <h2 className="font-semibold">Platform backup</h2>
-        <p className="mt-2 text-sm text-app-muted">
-          Export all tenant data stored in this browser session. For company-scoped backups, use Settings → Backup &amp; Restore while impersonating a tenant.
-        </p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button type="button" className="btn btn-primary" onClick={handleBackup}>Export backup</button>
-          <button type="button" className="rounded-lg border border-app px-3 py-2 text-sm" onClick={handleRestore}>Restore</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GlobalSearch({ overview, companyMap, search, setSearch }) {
-  const query = search.trim().toLowerCase();
-  const companies = query
-    ? overview.companies.filter((company) => [company.name, company.code, company.email].some((value) => String(value || "").toLowerCase().includes(query)))
-    : overview.companies.slice(0, 15);
-  const users = query
-    ? overview.users.filter((member) => [member.name, member.username, member.email].some((value) => String(value || "").toLowerCase().includes(query)))
-    : overview.users.slice(0, 15);
-  return (
-    <div className="space-y-4">
-      <div className="card flex gap-3 p-4">
-        <div className="relative min-w-64 flex-1">
-          <Search size={15} className="absolute left-3 top-3 text-app-muted" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search companies and users globally…"
-            className="form-control min-h-10 w-full rounded-xl border pl-9 pr-3 text-sm"
-          />
-        </div>
-      </div>
-      <DataTable headings={["Company", "Code", "Status", "Plan", "Users"]}>
-        {companies.map((company) => (
-          <tr key={company.id} className="border-t border-app">
-            <Cell><strong>{company.name}</strong></Cell>
-            <Cell><span className="font-mono text-xs">{company.code}</span></Cell>
-            <Cell className="capitalize">{statusLabel(company.status)}</Cell>
-            <Cell>{company.subscription_plan}</Cell>
-            <Cell>{company.user_count}</Cell>
-          </tr>
-        ))}
-      </DataTable>
-      <DataTable headings={["Name", "Email", "Role", "Company", "Status"]}>
-        {users.map((member) => (
-          <tr key={member.id} className="border-t border-app">
-            <Cell>{member.name}<div className="text-xs text-app-muted">@{member.username}</div></Cell>
-            <Cell>{member.email}</Cell>
-            <Cell className="capitalize">{statusLabel(member.role)}</Cell>
-            <Cell>{companyMap[member.company_id]?.name || "—"}</Cell>
-            <Cell>{member.active ? "Active" : "Inactive"}</Cell>
-          </tr>
-        ))}
-      </DataTable>
-    </div>
-  );
 }
 
 function Cell({ children, className = "" }) {

@@ -23,23 +23,24 @@ import {
   Sun,
   Building2,
   CircleDollarSign,
-  Globe2,
   ScrollText,
   SlidersHorizontal,
   Search,
-  HardDrive,
   KeyRound,
-  ClipboardList,
   PanelLeftClose,
   PanelLeftOpen,
   Bell,
   ChevronDown,
   Home,
+  Wallet,
+  LifeBuoy,
+  Sparkles,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 import { api } from "../lib/api";
 import { isOwner, isPlatformOwner, roleLabel } from "../lib/rbac";
+import NexoraAiAssistant, { NexoraAiNavButton } from "./ai/NexoraAiAssistant";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -81,6 +82,8 @@ const PRIMARY_NAV = [
 const SECONDARY_NAV = [
   { to: "/sales", label: "Sale history", icon: ReceiptText, module: "sales" },
   { to: "/expenses", label: "Expenses", icon: Receipt, module: "expenses" },
+  { to: "/payroll", label: "Payroll", icon: Wallet, module: "payroll" },
+  { to: "/payroll/self", label: "My HR", icon: Users, module: "payroll" },
   { to: "/roles", label: "Roles", icon: ShieldCheck, module: "roles" },
   { to: "/audit", label: "Audit", icon: ScrollText, module: "audit_logs" },
   { to: "/subscription", label: "Plan", icon: CreditCard, module: "subscription", ownerOnly: true },
@@ -95,23 +98,18 @@ const NAV_SECTIONS = [
 const PLATFORM_SECTIONS = [
   {
     id: "platform",
-    label: "Platform",
+    label: "Menu",
     items: [
       { to: "/platform", label: "Dashboard", icon: LayoutDashboard, module: "owner_management" },
-      { to: "/platform/companies", label: "Companies", icon: Building2, module: "company_accounts" },
+      { to: "/platform/companies", label: "Company Management", icon: Building2, module: "company_accounts" },
       { to: "/platform/subscriptions", label: "Subscriptions", icon: CreditCard, module: "subscriptions" },
-      { to: "/platform/pricing", label: "Pricing", icon: SlidersHorizontal, module: "plans" },
-      { to: "/platform/users", label: "Users", icon: Users, module: "users" },
-      { to: "/platform/branches", label: "Branches", icon: Building2, module: "branches" },
-      { to: "/platform/roles", label: "Roles", icon: ShieldCheck, module: "roles" },
-      { to: "/platform/approvals", label: "Approvals", icon: ClipboardList, module: "platform_approvals" },
-      { to: "/platform/analytics", label: "Reports", icon: BarChart3, module: "platform_analytics" },
-      { to: "/platform/settings", label: "Settings", icon: Settings, module: "platform_settings" },
-      { to: "/platform/audit", label: "Audit", icon: ScrollText, module: "platform_audit" },
-      { to: "/platform/backup", label: "Backup", icon: HardDrive, module: "backup" },
       { to: "/platform/payments", label: "Payments", icon: CircleDollarSign, module: "billing" },
-      { to: "/platform/domains", label: "Domains", icon: Globe2, module: "domains" },
-      { to: "/platform/search", label: "Search", icon: Search, module: "owner_management" },
+      { to: "/platform/pricing", label: "Plans", icon: SlidersHorizontal, module: "plans" },
+      { to: "/platform/analytics", label: "Reports", icon: BarChart3, module: "platform_analytics" },
+      { to: "/platform/support", label: "Support", icon: LifeBuoy, module: "owner_management" },
+      { to: "/platform/ai-guardian", label: "AI Guardian", icon: Sparkles, module: "owner_management" },
+      { to: "/platform/audit", label: "Audit Logs", icon: ScrollText, module: "platform_audit" },
+      { to: "/platform/settings", label: "Settings", icon: Settings, module: "platform_settings" },
     ],
   },
 ];
@@ -214,6 +212,7 @@ export default function Layout() {
   const [branches, setBranches] = useState([]);
   const [headerSearch, setHeaderSearch] = useState("");
   const [notifications, setNotifications] = useState({ items: [], unread: 0 });
+  const [aiOpen, setAiOpen] = useState(false);
 
   const platformMode = isPlatformOwner(user?.role) && !impersonation;
   const companyOwner = isOwner(user?.role);
@@ -239,8 +238,16 @@ export default function Layout() {
 
   useEffect(() => {
     if (!platformMode) {
-      api.settings.getAll().then(setSettings);
-      api.branches?.getAll?.().then(setBranches);
+      api.settings.getAll()
+        .then((row) => {
+          if (row && typeof row === "object" && row.success !== false) setSettings(row);
+        })
+        .catch(() => null);
+      api.branches?.getAll?.()
+        .then((rows) => {
+          if (Array.isArray(rows)) setBranches(rows);
+        })
+        .catch(() => null);
       api.notifications?.list?.()
         .then((result) => {
           if (result?.items) setNotifications({ items: result.items, unread: result.unread || result.items.length });
@@ -319,7 +326,7 @@ export default function Layout() {
           </div>
           <div className="nx-brand-copy min-w-0">
             <div className="nx-brand-name truncate">Nexora</div>
-            <div className="nx-brand-sub">POS Enterprise</div>
+            <div className="nx-brand-sub">POS Pro</div>
           </div>
         </div>
       </div>
@@ -416,7 +423,7 @@ export default function Layout() {
               >
                 <Menu size={18} />
               </Button>
-              <div className="nx-topbar-logo hidden sm:flex" title="Nexora POS Enterprise" aria-hidden>
+              <div className="nx-topbar-logo hidden sm:flex" title="Nexora POS Pro" aria-hidden>
                 <Store size={15} />
               </div>
               <span className="nx-topbar-brand-label hidden md:inline">Nexora</span>
@@ -541,6 +548,8 @@ export default function Layout() {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              <NexoraAiNavButton onClick={() => setAiOpen(true)} />
             </div>
           </div>
         </header>
@@ -568,6 +577,8 @@ export default function Layout() {
         <main id="main-content" className={cn("nx-main-content", isPosRoute && "is-pos")} tabIndex={-1}>
           <Outlet />
         </main>
+
+        <NexoraAiAssistant open={aiOpen} onOpenChange={setAiOpen} />
       </div>
     </div>
   );

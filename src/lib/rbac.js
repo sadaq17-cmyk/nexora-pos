@@ -1,4 +1,4 @@
-/** Nexora POS Enterprise — Role-Based Access Control definitions */
+/** Nexora POS Pro — Role-Based Access Control definitions */
 
 export const ACTIONS = ["view", "create", "edit", "delete", "approve", "print", "export"];
 
@@ -18,13 +18,14 @@ export const MODULES = [
   { id: "discounts", label: "Discounts", group: "Sales" },
   { id: "refunds", label: "Refunds", group: "Sales" },
   { id: "expenses", label: "Expenses", group: "Finance" },
+  { id: "payroll", label: "Payroll & HR", group: "Finance" },
   { id: "reports", label: "Reports", group: "Finance" },
   { id: "export_reports", label: "Export Reports", group: "Finance" },
   { id: "print_reports", label: "Print Reports", group: "Finance" },
   { id: "settings", label: "Settings", group: "System" },
   { id: "currencies", label: "Currencies", group: "System" },
   { id: "owner_management", label: "Owner Management", group: "System" },
-  { id: "company_accounts", label: "Company Accounts", group: "Platform" },
+  { id: "company_accounts", label: "Company Management", group: "Platform" },
   { id: "subscriptions", label: "Subscriptions", group: "Platform" },
   { id: "plans", label: "Plans", group: "Platform" },
   { id: "billing", label: "Billing", group: "Platform" },
@@ -157,6 +158,10 @@ export const ROLE_ALIASES = {
   sales_associate: "cashier",
   salesassociate: "cashier",
   accountant: "accountant",
+  hr_manager: "admin",
+  hrmanager: "admin",
+  payroll_officer: "accountant",
+  payrollofficer: "accountant",
 };
 
 export function normalizeRole(role) {
@@ -343,6 +348,10 @@ export function buildDefaultMatrix() {
   branchManager.purchases.delete = false;
   branchManager.suppliers.delete = false;
   branchManager.customers.delete = false;
+  // HR: view attendance/leave, approve leave; no payroll run lock/delete
+  branchManager.payroll = {
+    view: true, create: true, edit: true, delete: false, approve: true, print: true, export: false,
+  };
 
   const inventoryManager = grant(
     emptyPerms(false),
@@ -369,22 +378,26 @@ export function buildDefaultMatrix() {
     ["view", "create", "edit"]
   );
 
-  // Cashier: POS only (catalog lookup required at checkout)
+  // Cashier: POS + employee self-service (server scopes to linked employee)
   const cashier = grant(emptyPerms(false), ["pos"], ["view", "create"]);
   cashier.products = { ...emptyPerms(false).products, view: true };
   cashier.barcode = { ...emptyPerms(false).barcode, view: true, create: true };
   cashier.discounts = { ...emptyPerms(false).discounts, view: true, create: true };
+  cashier.payroll = {
+    view: true, create: true, edit: false, delete: false, approve: false, print: true, export: false,
+  };
 
   const accountant = grant(
     emptyPerms(false),
     [
-      "dashboard", "purchases", "suppliers", "customers", "sales", "expenses",
+      "dashboard", "purchases", "suppliers", "customers", "sales", "expenses", "payroll",
       "reports", "export_reports", "print_reports", "settings", "audit_logs",
     ],
     ["view", "create", "edit", "print", "export"]
   );
   accountant.expenses.approve = true;
   accountant.purchases.approve = true;
+  accountant.payroll.approve = true;
   accountant.settings.edit = true;
 
   return {
@@ -404,7 +417,8 @@ export function buildDefaultMatrix() {
 export function roleLabel(roleId, customRoles = []) {
   const system = SYSTEM_ROLES.find((r) => r.id === roleId);
   if (system) return system.label;
-  const custom = customRoles.find((r) => r.id === roleId);
+  const list = Array.isArray(customRoles) ? customRoles : [];
+  const custom = list.find((r) => r.id === roleId);
   return custom?.label || roleId;
 }
 

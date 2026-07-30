@@ -1,12 +1,14 @@
 import { Suspense, lazy } from "react";
-import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
 import ProtectedRoute from "./components/ProtectedRoute";
+import RouteErrorBoundary from "./components/RouteErrorBoundary";
 import Layout from "./components/Layout";
 import PublicLayout from "./components/public/PublicLayout";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnterpriseSettingsProvider } from "./context/EnterpriseSettingsContext";
+import { useHashRouter } from "./lib/desktopRuntime";
 
 const Login = lazy(() => import("./pages/Login"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
@@ -20,6 +22,8 @@ const SalesHistory = lazy(() => import("./pages/SalesHistory"));
 const Suppliers = lazy(() => import("./pages/Suppliers"));
 const Purchases = lazy(() => import("./pages/Purchases"));
 const Expenses = lazy(() => import("./pages/Expenses"));
+const Payroll = lazy(() => import("./pages/Payroll"));
+const PayrollSelfService = lazy(() => import("./pages/PayrollSelfService"));
 const Reports = lazy(() => import("./pages/Reports"));
 const Users = lazy(() => import("./pages/Users"));
 const Branches = lazy(() => import("./pages/Branches"));
@@ -73,12 +77,17 @@ function RouteFallback() {
 }
 
 export default function App() {
+  // Electron loadFile (file://) cannot use path-based BrowserRouter — pathname is the
+  // filesystem path and hits the catch-all NotFound ("That page doesn't exist.").
+  // Web / Vercel keep BrowserRouter. Packaged desktop prefers the production https origin.
+  const Router = useHashRouter() ? HashRouter : BrowserRouter;
+
   return (
     <ThemeProvider>
       <AuthProvider>
         <EnterpriseSettingsProvider>
           <ToastProvider>
-            <BrowserRouter>
+            <Router>
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
                   <Route element={<PublicLayout />}>
@@ -101,9 +110,11 @@ export default function App() {
 
                   <Route
                     element={
-                      <ProtectedRoute>
-                        <Layout />
-                      </ProtectedRoute>
+                      <RouteErrorBoundary>
+                        <ProtectedRoute>
+                          <Layout />
+                        </ProtectedRoute>
+                      </RouteErrorBoundary>
                     }
                   >
                     <Route path="/dashboard" element={<Guarded module="dashboard"><Dashboard /></Guarded>} />
@@ -119,6 +130,8 @@ export default function App() {
                     <Route path="/reports" element={<Guarded module="reports"><Reports /></Guarded>} />
                     <Route path="/reports/users" element={<Guarded module="reports"><UserSalesReport /></Guarded>} />
                     <Route path="/expenses" element={<Guarded module="expenses"><Expenses /></Guarded>} />
+                    <Route path="/payroll" element={<Guarded module="payroll"><Payroll /></Guarded>} />
+                    <Route path="/payroll/self" element={<Guarded module="payroll"><PayrollSelfService /></Guarded>} />
                     <Route path="/users" element={<Guarded module="users"><Users /></Guarded>} />
                     <Route path="/branches" element={<Guarded module="branches"><Branches /></Guarded>} />
                     <Route path="/users/new" element={<ProtectedRoute module="users" action="create" allowedRoles={["owner", "super_admin", "admin", "platform_owner"]}><UserForm /></ProtectedRoute>} />
@@ -137,25 +150,39 @@ export default function App() {
                     <Route path="/platform/companies" element={<ProtectedRoute module="company_accounts" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/platform/subscriptions" element={<ProtectedRoute module="subscriptions" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/platform/pricing" element={<ProtectedRoute module="plans" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/users" element={<ProtectedRoute module="users" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/branches" element={<ProtectedRoute module="branches" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/roles" element={<ProtectedRoute module="roles" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/backup" element={<ProtectedRoute module="backup" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/search" element={<ProtectedRoute module="owner_management" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
+                    <Route path="/platform/users" element={<Navigate to="/platform/companies" replace />} />
+                    <Route path="/platform/branches" element={<Navigate to="/platform/companies" replace />} />
+                    <Route path="/platform/roles" element={<Navigate to="/platform/settings" replace />} />
+                    <Route path="/platform/backup" element={<Navigate to="/platform/settings" replace />} />
+                    <Route path="/platform/search" element={<Navigate to="/platform/companies" replace />} />
                     <Route path="/platform/payments" element={<ProtectedRoute module="billing" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/platform/analytics" element={<ProtectedRoute module="platform_analytics" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
-                    <Route path="/platform/domains" element={<ProtectedRoute module="domains" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
+                    <Route path="/platform/domains" element={<Navigate to="/platform/settings" replace />} />
+                    <Route path="/platform/support" element={<ProtectedRoute module="owner_management" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
+                    <Route path="/platform/ai-guardian" element={<ProtectedRoute module="owner_management" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/platform/settings" element={<ProtectedRoute module="platform_settings" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/platform/audit" element={<ProtectedRoute module="platform_audit" allowedRoles={["platform_owner"]}><OwnerManagement /></ProtectedRoute>} />
                     <Route path="/change-password" element={<ProtectedRoute><ChangePassword /></ProtectedRoute>} />
-                    <Route path="/subscription/renew" element={<ProtectedRoute><SubscriptionRenew /></ProtectedRoute>} />
-                    <Route path="/subscription/payment" element={<Navigate to="/subscription/renew" replace />} />
                   </Route>
+
+                  {/* Standalone renewal portal — must NOT nest under Layout (sidebar/AI/settings
+                      fetches can blank the page when subscription APIs fail). */}
+                  <Route
+                    path="/subscription/renew"
+                    element={
+                      <RouteErrorBoundary>
+                        <ProtectedRoute>
+                          <SubscriptionRenew />
+                        </ProtectedRoute>
+                      </RouteErrorBoundary>
+                    }
+                  />
+                  <Route path="/subscription/payment" element={<Navigate to="/subscription/renew" replace />} />
 
                   <Route path="*" element={<NotFound />} />
                 </Routes>
               </Suspense>
-            </BrowserRouter>
+            </Router>
           </ToastProvider>
         </EnterpriseSettingsProvider>
       </AuthProvider>

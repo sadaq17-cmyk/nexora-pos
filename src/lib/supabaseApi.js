@@ -4,6 +4,7 @@
  */
 
 import { authFetch } from "./authApi";
+import { resolveApiUrl } from "./desktopRuntime";
 import { applyPermissionMiddleware } from "./permissionMiddleware";
 import { buildDefaultMatrix, ensurePermissionShape, isPlatformOwner, normalizeRole } from "./rbac";
 import { validateSalePayment } from "./paymentMethods";
@@ -51,12 +52,21 @@ async function pos(action, params = {}) {
 
 async function posOrEmpty(action, params, empty) {
   const result = await pos(action, params);
-  if (result && typeof result === "object" && result.success === false && result.code === "UNAUTHENTICATED") {
-    return empty;
-  }
-  if (result && typeof result === "object" && "success" in result && result.success === false && result.code === "POS_ERROR") {
-    console.error("[supabaseApi]", action, result.error);
-    return empty;
+  if (result && typeof result === "object" && result.success === false) {
+    const code = String(result.code || "");
+    // Always settle to empty for transport/auth failures — never leave callers waiting on soft errors.
+    if (
+      code === "UNAUTHENTICATED" ||
+      code === "POS_ERROR" ||
+      code === "TIMEOUT" ||
+      code === "NETWORK" ||
+      code === "ABORTED" ||
+      code === "CONFIG" ||
+      code === "CSRF_ORIGIN"
+    ) {
+      if (code === "POS_ERROR") console.error("[supabaseApi]", action, result.error);
+      return empty;
+    }
   }
   return result;
 }
@@ -146,16 +156,36 @@ const rawApi = {
   },
 
   publicAuth: {
-    createCompanyWorkspace: async () => ({
-      success: false,
-      error: "Use signup flow with /api/bootstrap-company-owner.",
-    }),
+    createCompanyWorkspace: async (payload = {}) => {
+      try {
+        const data = await authFetch("/api/bootstrap-company-owner", {
+          method: "POST",
+          body: { ...payload, action: "signup_company", create_company: true },
+        });
+        if (data && data.success === false) {
+          return { success: false, error: data.error || "Unable to create company workspace.", code: data.code };
+        }
+        return data?.success ? data : { success: true, ...data };
+      } catch (err) {
+        return { success: false, error: err?.message || "Unable to create company workspace." };
+      }
+    },
     companyNameTaken: async () => false,
     resolveCompany: async (companyIdentifier) => {
       const code = String(companyIdentifier || "").trim().toUpperCase();
-      if (!code) return null;
-      // Company resolution stays on auth metadata / bootstrap; optional DB lookup later.
-      return null;
+      if (!code || code === "PLATFORM") return null;
+      try {
+        const res = await fetch(resolveApiUrl("/api/bootstrap-company-owner"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "resolve_company", company_code: code }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!data?.success || !data?.company) return null;
+        return data.company;
+      } catch {
+        return null;
+      }
     },
     getCompanyById: async (companyId) => pos("companies.getById", { id: companyId }),
     checkCompanyAccess: async (companyId, options = {}) => pos("companies.checkAccess", {
@@ -163,7 +193,10 @@ const rawApi = {
       role: options.role,
     }),
     hydrateCompanyWorkspaceFromAuth: async (payload = {}) => pos("companies.hydrate", payload),
-    activateCompanyForOwner: async () => ({ success: true }),
+    activateCompanyForOwner: async (ownerUserId) => {
+      if (!ownerUserId) return { success: false, error: "Missing owner id." };
+      return pos("companies.activateForOwner", { owner_user_id: ownerUserId });
+    },
     syncOwnerEmailProfile: async () => ({ success: true }),
     signupCompany: async () => ({
       success: false,
@@ -200,11 +233,18 @@ const rawApi = {
       return { success: true };
     },
     heartbeat: async () => ({ success: Boolean(currentUser), at: new Date().toISOString() }),
-    listUsers: async () => authFetch("/api/admin-list-users", { method: "POST", body: {} }),
-    getUser: async (id) => {
+    listUsers: async () => {
       const listed = await authFetch("/api/admin-list-users", { method: "POST", body: {} });
-      const users = listed?.users || listed || [];
-      return (Array.isArray(users) ? users : []).find((u) => String(u.id) === String(id)) || null;
+      // API returns { success, users }; never return the envelope — UI expects an array.
+      if (Array.isArray(listed)) return listed;
+      if (Array.isArray(listed?.users)) return listed.users;
+      return [];
+    },
+    getUser: async (id) => {
+      const listed = await authFetch("/api/admin-list-users", { method: "POST", body: { id } });
+      if (listed?.user) return listed.user;
+      const users = Array.isArray(listed?.users) ? listed.users : (Array.isArray(listed) ? listed : []);
+      return users.find((u) => String(u.id) === String(id)) || null;
     },
   },
 
@@ -326,6 +366,11 @@ const rawApi = {
     delete: async (id) => {
       const result = await pos("warehouses.delete", { id });
       invalidateEntityCaches("warehouses.getAll");
+      return result;
+    },
+    setMain: async (id) => {
+      const result = await pos("warehouses.setMain", { id });
+      invalidateEntityCaches("warehouses.getAll", "inventory.getWarehouseStock", "inventory.getStats");
       return result;
     },
   },
@@ -468,9 +513,30 @@ const rawApi = {
       invalidateEntityCaches("suppliers.getAll");
       return result;
     },
-    getStatement: (id) => pos("suppliers.getStatement", { id }),
+    getStatement: (idOrParams) =>
+      pos("suppliers.getStatement", typeof idOrParams === "object" ? idOrParams : { id: idOrParams }),
     getLedger: (id) => pos("suppliers.getLedger", { id }),
     getPurchaseHistory: (id) => posOrEmpty("suppliers.getPurchaseHistory", { id }, []),
+    addStatementEntry: async (payload) => {
+      const result = await pos("suppliers.addStatementEntry", payload);
+      invalidateEntityCaches("suppliers.getAll");
+      return result;
+    },
+    deleteStatementEntry: async (id) => {
+      const result = await pos("suppliers.deleteStatementEntry", { id });
+      invalidateEntityCaches("suppliers.getAll");
+      return result;
+    },
+    emailStatement: async ({ supplier_id, to, pdf_base64, filename, message } = {}) => {
+      try {
+        return await authFetch("/api/send-email", {
+          method: "POST",
+          body: { type: "supplier_statement", supplier_id, to, pdf_base64, filename, message },
+        });
+      } catch (err) {
+        return { success: false, error: err?.message || "Could not email statement." };
+      }
+    },
   },
 
   purchases: {
@@ -495,6 +561,19 @@ const rawApi = {
     duplicate: async (id) => {
       const result = await pos("purchases.duplicate", { id });
       invalidateEntityCaches("purchases.getAll", "purchases.getDashboard", "notifications.list");
+      return result;
+    },
+    approve: async (id, opts = {}) => {
+      const result = await pos("purchases.approve", typeof id === "object" ? id : { id, ...opts });
+      invalidateEntityCaches(
+        "purchases.getAll",
+        "purchases.getDashboard",
+        "products.getAll",
+        "inventory.getStats",
+        "inventory.getLowStock",
+        "notifications.list",
+        "suppliers.getAll"
+      );
       return result;
     },
     receive: async (id, opts = {}) => {
@@ -573,6 +652,20 @@ const rawApi = {
       invalidateEntityCaches("products.getAll", "inventory.getStats", "inventory.getLowStock", "notifications.list");
       return result;
     },
+    listVariantSkus: (params = {}) => posOrEmpty("inventory.listVariantSkus", params, []),
+    upsertVariantSku: async (payload) => {
+      const result = await pos("inventory.upsertVariantSku", payload);
+      invalidateEntityCaches("products.getAll", "inventory.getStats");
+      return result;
+    },
+    listSerials: (params = {}) => posOrEmpty("inventory.listSerials", params, []),
+    registerSerials: async (payload) => {
+      const result = await pos("inventory.registerSerials", payload);
+      invalidateEntityCaches("inventory.getStats");
+      return result;
+    },
+    listOpenLots: (params = {}) => posOrEmpty("inventory.listOpenLots", params, []),
+    previewLotPick: (params = {}) => pos("inventory.previewLotPick", params),
   },
 
   barcode: {
@@ -633,6 +726,48 @@ const rawApi = {
     getSummary: () => cachedPos("expenses.getSummary", {}, {}, LIST_TTL_MS),
   },
 
+  payroll: {
+    getSettings: () => pos("payroll.getSettings"),
+    updateSettings: (payload) => pos("payroll.updateSettings", payload),
+    listEmployees: (params = {}) => posOrEmpty("payroll.listEmployees", params, []),
+    getEmployee: (id) => pos("payroll.getEmployee", { id }),
+    createEmployee: (payload) => pos("payroll.createEmployee", payload),
+    updateEmployee: (payload) => pos("payroll.updateEmployee", payload),
+    deleteEmployee: (id) => pos("payroll.deleteEmployee", { id }),
+    addDocument: (payload) => pos("payroll.addDocument", payload),
+    listAttendance: (params = {}) => posOrEmpty("payroll.listAttendance", params, []),
+    checkIn: (payload = {}) => pos("payroll.checkIn", payload),
+    checkOut: (payload = {}) => pos("payroll.checkOut", payload),
+    recordAttendance: (payload) => pos("payroll.recordAttendance", payload),
+    listLeave: (params = {}) => posOrEmpty("payroll.listLeave", params, []),
+    requestLeave: (payload) => pos("payroll.requestLeave", payload),
+    approveLeave: (id) => pos("payroll.approveLeave", { id }),
+    rejectLeave: (id, reason) => pos("payroll.rejectLeave", { id, reason }),
+    getLeaveBalances: (params = {}) => posOrEmpty("payroll.getLeaveBalances", params, []),
+    listSalaryStructures: (params = {}) => posOrEmpty("payroll.listSalaryStructures", params, []),
+    upsertSalaryStructure: (payload) => pos("payroll.upsertSalaryStructure", payload),
+    listLoans: (params = {}) => posOrEmpty("payroll.listLoans", params, []),
+    createLoan: (payload) => pos("payroll.createLoan", payload),
+    listRuns: (params = {}) => posOrEmpty("payroll.listRuns", params, []),
+    createRun: (payload) => pos("payroll.createRun", payload),
+    previewRun: (id, extras = {}) => pos("payroll.previewRun", { id, ...extras }),
+    regenerateRun: (id) => pos("payroll.regenerateRun", { id }),
+    approveRun: (id) => pos("payroll.approveRun", { id }),
+    lockRun: (id) => pos("payroll.lockRun", { id }),
+    unlockRun: (id) => pos("payroll.unlockRun", { id }),
+    rollbackRun: (id) => pos("payroll.rollbackRun", { id }),
+    listPayslips: (params = {}) => posOrEmpty("payroll.listPayslips", params, []),
+    getPayslip: (id) => pos("payroll.getPayslip", { id }),
+    bankExport: (runId) => pos("payroll.bankExport", { run_id: runId }),
+    getDashboard: () => pos("payroll.getDashboard"),
+    getReports: (params = {}) => pos("payroll.getReports", params),
+    selfOverview: () => pos("payroll.selfOverview"),
+  },
+
+  dashboard: {
+    getExtendedStats: () => cachedPos("dashboard.getExtendedStats", {}, null, 15_000),
+  },
+
   reports: {
     getAnalytics: (filters = {}) => cachedPos("reports.getAnalytics", filters, null, 15_000),
     getUserSales: (filters = {}) => pos("reports.getUserSales", filters),
@@ -657,7 +792,7 @@ const rawApi = {
         "settings.getPublic",
         {},
         {
-          store_name: "Nexora POS Enterprise",
+          store_name: "",
           currency: "KES",
           enable_multi_currency: "true",
           admin_can_edit_rates: "false",
@@ -886,11 +1021,13 @@ const rawApi = {
   },
 
   owner: {
+    /** Company Owner self-service (tenant-scoped hydrate). */
     getCompany: async () => {
       if (!currentUser?.company_id) return null;
       return pos("companies.getById", { id: currentUser.company_id });
     },
-    updateCompany: async (updates) => {
+    /** @deprecated Prefer platform.updateCompany — kept for Company Owner settings forms. */
+    updateCompanySelf: async (updates) => {
       if (!currentUser?.company_id) return { success: false, error: "No company." };
       return pos("companies.hydrate", {
         company_id: currentUser.company_id,
@@ -903,6 +1040,55 @@ const rawApi = {
         email_verified: true,
       });
     },
+
+    // ---- Platform Owner console (platform_owner only; enforced server-side) ----
+    getOverview: (filters = {}) => pos("platform.getOverview", filters),
+    getPlatformConsole: () => pos("platform.getConsole", {}),
+    getCompanyDetail: (id) => pos("platform.getCompany", { id }),
+    updateCompany: (id, updates = {}) => pos("platform.updateCompany", { id, ...updates }),
+    activateCompany: (id) => pos("platform.activateCompany", { id }),
+    deactivateCompany: (id) => pos("platform.deactivateCompany", { id }),
+    suspendCompany: (id) => pos("platform.suspendCompany", { id }),
+    deleteCompany: (id) => pos("platform.deleteCompany", { id }),
+    lockCompany: (id) => pos("platform.lockCompany", { id }),
+    unlockCompany: (id) => pos("platform.unlockCompany", { id }),
+    updateSubscription: (companyId, updates = {}) =>
+      pos("platform.updateSubscription", { company_id: companyId, ...updates }),
+    extendSubscription: (companyId, days = 30) =>
+      pos("platform.extendSubscription", { company_id: companyId, days }),
+    extendTrial: (companyId, days = 7) =>
+      pos("platform.extendTrial", { company_id: companyId, days }),
+    markPaid: (companyId, payload = {}) =>
+      pos("platform.markPaid", { company_id: companyId, ...payload }),
+    getCompanyHistory: (companyId) =>
+      pos("platform.getCompanyHistory", { company_id: companyId }),
+    resetOwnerPassword: (companyId, password) =>
+      pos("platform.resetOwnerPassword", { company_id: companyId, password }),
+    recordAudit: (action, details = {}) =>
+      pos("platform.recordAudit", { action, details, company_id: details.company_id }),
+    impersonateUser: (targetId) =>
+      authFetch("/api/admin-impersonate", { method: "POST", body: { target_id: targetId } }),
+
+    // Deferred / not provisioned in Postgres (honest stubs)
+    savePlan: async () => ({
+      success: false,
+      error: "Plan catalog is code-defined (CANONICAL_PLANS). Edit via release, not runtime DB.",
+      code: "NOT_IMPLEMENTED",
+    }),
+    saveFeature: async () => ({ success: false, error: "Feature flags table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    toggleCompanyFeature: async () => ({ success: false, error: "Feature overrides table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    addDomain: async () => ({ success: false, error: "Domains table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    verifyDomain: async () => ({ success: false, error: "Domains table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    setPrimaryDomain: async () => ({ success: false, error: "Domains table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    removeDomain: async () => ({ success: false, error: "Domains table not provisioned.", code: "NOT_IMPLEMENTED" }),
+    updatePlatformSettings: async () => ({ success: true, note: "No persistent platform_settings table; acknowledged." }),
+    createCompanyAccount: async () => ({
+      success: false,
+      error: "Create companies via public signup + bootstrap, or seed with ensure-permanent-owner.",
+      code: "NOT_IMPLEMENTED",
+    }),
+    verifyCompanyOwnerEmail: async () => ({ success: false, error: "Use Auth email confirmation flow.", code: "NOT_IMPLEMENTED" }),
+    getActivity: async () => ({ success: false, error: "Per-user activity detail not migrated.", code: "NOT_IMPLEMENTED" }),
   },
 
   branches: {
@@ -914,6 +1100,11 @@ const rawApi = {
     },
     update: async (payload) => {
       const result = await pos("branches.update", payload);
+      invalidateEntityCaches("branches.getAll");
+      return result;
+    },
+    delete: async (id) => {
+      const result = await pos("branches.delete", { id });
       invalidateEntityCaches("branches.getAll");
       return result;
     },

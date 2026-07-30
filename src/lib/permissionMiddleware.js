@@ -1,4 +1,4 @@
-import { hasPermission, isOwner, isSuperAdmin } from "./rbac";
+import { hasPermission, isOwner, isSuperAdmin } from "./rbac.js";
 
 /**
  * Maps every API namespace.method to [module, action, denyShape]
@@ -100,6 +100,12 @@ export const API_PERMISSION_MAP = {
   "inventory.postCount": ["inventory", "approve", "result"],
   "inventory.getCounts": ["inventory", "view", "array"],
   "inventory.getCount": ["inventory", "view", "null"],
+  "inventory.listVariantSkus": ["inventory", "view", "array"],
+  "inventory.upsertVariantSku": ["products", "edit", "result"],
+  "inventory.listSerials": ["inventory", "view", "array"],
+  "inventory.registerSerials": ["inventory", "create", "result"],
+  "inventory.listOpenLots": ["inventory", "view", "array"],
+  "inventory.previewLotPick": ["inventory", "view", "object"],
 
   "brands.getAll": ["brands", "view", "array"],
   "brands.create": ["brands", "create", "result"],
@@ -115,6 +121,7 @@ export const API_PERMISSION_MAP = {
   "warehouses.create": ["inventory", "create", "result"],
   "warehouses.update": ["inventory", "edit", "result"],
   "warehouses.delete": ["inventory", "delete", "result"],
+  "warehouses.setMain": ["inventory", "delete", "result"],
 
   "barcode.generate": ["barcode", "create", "result"],
   "barcode.generateBulk": ["barcode", "create", "result"],
@@ -132,6 +139,42 @@ export const API_PERMISSION_MAP = {
   "expenses.attachReceipt": ["expenses", "edit", "result"],
   "expenses.openReceipt": ["expenses", "view", "result"],
   "expenses.getSummary": ["expenses", "view", "object"],
+
+  "payroll.getSettings": ["payroll", "view", "object"],
+  "payroll.updateSettings": ["payroll", "edit", "result"],
+  "payroll.listEmployees": ["payroll", "view", "array"],
+  "payroll.getEmployee": ["payroll", "view", "object"],
+  "payroll.createEmployee": ["payroll", "create", "result"],
+  "payroll.updateEmployee": ["payroll", "edit", "result"],
+  "payroll.deleteEmployee": ["payroll", "delete", "result"],
+  "payroll.addDocument": ["payroll", "edit", "result"],
+  "payroll.listAttendance": ["payroll", "view", "array"],
+  "payroll.checkIn": ["payroll", "create", "result"],
+  "payroll.checkOut": ["payroll", "create", "result"],
+  "payroll.recordAttendance": ["payroll", "create", "result"],
+  "payroll.listLeave": ["payroll", "view", "array"],
+  "payroll.requestLeave": ["payroll", "create", "result"],
+  "payroll.approveLeave": ["payroll", "approve", "result"],
+  "payroll.rejectLeave": ["payroll", "approve", "result"],
+  "payroll.getLeaveBalances": ["payroll", "view", "array"],
+  "payroll.listSalaryStructures": ["payroll", "view", "array"],
+  "payroll.upsertSalaryStructure": ["payroll", "edit", "result"],
+  "payroll.listLoans": ["payroll", "view", "array"],
+  "payroll.createLoan": ["payroll", "create", "result"],
+  "payroll.listRuns": ["payroll", "view", "array"],
+  "payroll.createRun": ["payroll", "create", "result"],
+  "payroll.previewRun": ["payroll", "create", "result"],
+  "payroll.regenerateRun": ["payroll", "create", "result"],
+  "payroll.approveRun": ["payroll", "approve", "result"],
+  "payroll.lockRun": ["payroll", "approve", "result"],
+  "payroll.unlockRun": ["payroll", "approve", "result"],
+  "payroll.rollbackRun": ["payroll", "delete", "result"],
+  "payroll.listPayslips": ["payroll", "view", "array"],
+  "payroll.getPayslip": ["payroll", "view", "object"],
+  "payroll.bankExport": ["payroll", "export", "result"],
+  "payroll.getDashboard": ["payroll", "view", "object"],
+  "payroll.getReports": ["payroll", "view", "object"],
+  "payroll.selfOverview": ["payroll", "view", "object"],
 
   "reports.getRevenueVsExpenses": ["reports", "view", "array"],
   "reports.getAnalytics": ["reports", "view", "object"],
@@ -212,9 +255,21 @@ export const API_PERMISSION_MAP = {
 
   "owner.getOverview": ["owner_management", "view", "result"],
   "owner.getPlatformConsole": ["platform_analytics", "view", "result"],
+  "owner.getCompanyDetail": ["company_accounts", "view", "result"],
   "owner.createCompanyAccount": ["company_accounts", "create", "result"],
   "owner.updateCompany": ["company_accounts", "edit", "result"],
+  "owner.activateCompany": ["company_accounts", "edit", "result"],
+  "owner.deactivateCompany": ["company_accounts", "edit", "result"],
+  "owner.suspendCompany": ["company_accounts", "edit", "result"],
+  "owner.deleteCompany": ["company_accounts", "delete", "result"],
+  "owner.lockCompany": ["company_accounts", "edit", "result"],
+  "owner.unlockCompany": ["company_accounts", "edit", "result"],
   "owner.updateSubscription": ["subscriptions", "edit", "result"],
+  "owner.extendSubscription": ["subscriptions", "edit", "result"],
+  "owner.extendTrial": ["subscriptions", "edit", "result"],
+  "owner.markPaid": ["billing", "edit", "result"],
+  "owner.getCompanyHistory": ["company_accounts", "view", "result"],
+  "owner.resetOwnerPassword": ["company_accounts", "edit", "result"],
   "owner.savePlan": ["plans", "edit", "result"],
   "owner.addDomain": ["domains", "create", "result"],
   "owner.verifyDomain": ["domains", "edit", "result"],
@@ -232,11 +287,13 @@ export const API_PERMISSION_MAP = {
   "branches.update": ["branches", "edit", "result"],
   "branches.delete": ["branches", "delete", "result"],
 
-  "subscription.get": ["subscription", "view", "object"],
+  // Renewal portal must work even when matrix/permissions fail to load.
+  // Server still enforces Company Owner for changePlan / requestRenewal.
+  "subscription.get": null,
+  "subscription.getPlans": null,
   "subscription.update": ["subscription", "edit", "result"],
-  /** Same owner-gated activate/renew path as update (server also enforces owner). */
-  "subscription.changePlan": ["subscription", "edit", "result"],
-  "subscription.requestRenewal": ["subscription", "edit", "result"],
+  "subscription.changePlan": null,
+  "subscription.requestRenewal": null,
 };
 
 function denyValue(shape) {
