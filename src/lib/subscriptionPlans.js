@@ -1,4 +1,4 @@
-/** Nexora POS subscription catalog — single source of truth (KES). */
+/** Nexora POS Pro subscription catalog — single source of truth (KES). */
 
 export const DEFAULT_TRIAL_DAYS = 7;
 export const BILLING_CURRENCY = "KES";
@@ -30,9 +30,10 @@ export function normalizePlanCode(code) {
 
 export function getPlanByCode(code, plans = CANONICAL_PLANS) {
   const normalized = normalizePlanCode(code);
-  return plans.find((plan) => plan.code === normalized)
-    || plans.find((plan) => plan.code === "enterprise")
-    || plans[0]
+  const list = Array.isArray(plans) && plans.length ? plans : CANONICAL_PLANS;
+  return list.find((plan) => plan.code === normalized)
+    || list.find((plan) => plan.code === "enterprise")
+    || list[0]
     || null;
 }
 

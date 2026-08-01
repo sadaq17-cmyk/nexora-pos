@@ -61,11 +61,14 @@ function assertEnsureAuthorized(req, body) {
   }
 }
 
-/** Permanent Company Owner: Owner@Honest on NEXORA001 (official Zoho inbox) */
+/**
+ * Permanent Company Owner: Owner@Honest on NEXORA001.
+ * Login email is separate from the platform support inbox (support@… = Super Owner).
+ */
 const COMPANY_OWNER = {
   username: "owner@honest",
   displayUsername: "Owner@Honest",
-  email: "support@httpsnexorapos.com",
+  email: "owner@httpsnexorapos.com",
   name: "Honest Company Owner",
   role: "owner",
   company_id: 1,
@@ -78,15 +81,21 @@ const COMPANY_OWNER = {
 const LEGACY_OWNER_EMAILS = new Set([
   "owner.honest@nexorapos.demo",
   "companyowner@nexora.demo",
+  "support@httpsnexorapos.com", // former company-owner inbox; now Super Owner only
 ]);
 
-/** Permanent Platform Super Admin — global, no company */
+/** Permanent Platform Super Admin — official support / Super Owner (no company) */
 const PLATFORM_ADMIN = {
   username: "SuperAdmin",
-  email: "saadaq17@icloud.com",
+  email: "support@httpsnexorapos.com",
   name: "Platform Super Admin",
   role: "platform_owner",
 };
+
+const LEGACY_PLATFORM_EMAILS = new Set([
+  "saadaq17@icloud.com",
+  "platform.owner@nexora.demo",
+]);
 
 function companyOwnerMetadata() {
   return {
@@ -177,16 +186,65 @@ async function ensureCompanyOwner(admin) {
 
 async function ensurePlatformAdmin(admin, { forcePassword = false } = {}) {
   const users = await listAllAuthUsers(admin);
-  let existing = users.find(
-    (user) => String(user.email || "").toLowerCase() === PLATFORM_ADMIN.email.toLowerCase()
-  ) || null;
+  const platformRoleUsers = users.filter(
+    (user) => String(user.app_metadata?.role || "").toLowerCase() === "platform_owner"
+  );
+
+  // Prefer an existing platform_owner identity (never promote a tenant owner by email alone).
+  let existing = platformRoleUsers.find((user) => {
+    const meta = user.app_metadata || {};
+    return String(meta.username || "").toLowerCase() === PLATFORM_ADMIN.username.toLowerCase();
+  }) || null;
 
   if (!existing) {
-    existing = users.find((user) => {
-      const meta = user.app_metadata || {};
-      return String(meta.username || "").toLowerCase() === PLATFORM_ADMIN.username.toLowerCase()
-        && String(meta.role || "").toLowerCase() === "platform_owner";
-    }) || null;
+    existing = platformRoleUsers.find((user) =>
+      String(user.email || "").toLowerCase() === PLATFORM_ADMIN.email.toLowerCase()
+      || LEGACY_PLATFORM_EMAILS.has(String(user.email || "").trim().toLowerCase())
+    ) || null;
+  }
+
+  if (!existing && platformRoleUsers.length === 1) {
+    existing = platformRoleUsers[0];
+  }
+
+  // Never leave duplicate Super Owners — demote extras (no platform permissions).
+  for (const extra of platformRoleUsers) {
+    if (existing && String(extra.id) === String(existing.id)) continue;
+    const meta = extra.app_metadata || {};
+    await admin.auth.admin.updateUserById(extra.id, {
+      app_metadata: {
+        ...meta,
+        role: meta.company_id != null ? (meta.role === "platform_owner" ? "owner" : meta.role) : "cashier",
+        company_id: meta.company_id ?? null,
+        permanent: false,
+        platform_super_admin: false,
+        active: meta.company_id != null ? meta.active !== false : false,
+        demoted_from_platform_owner: true,
+      },
+    });
+  }
+
+  // Free the official support inbox if a non–Super-Owner still holds that email.
+  const supportConflict = users.find(
+    (user) =>
+      String(user.email || "").toLowerCase() === PLATFORM_ADMIN.email.toLowerCase()
+      && String(user.app_metadata?.role || "").toLowerCase() !== "platform_owner"
+      && (!existing || String(user.id) !== String(existing.id))
+  );
+  if (supportConflict) {
+    const meta = supportConflict.app_metadata || {};
+    await admin.auth.admin.updateUserById(supportConflict.id, {
+      email: COMPANY_OWNER.email,
+      email_confirm: true,
+      app_metadata: {
+        ...meta,
+        role: normalizeTenantOwnerRole(meta.role),
+        company_id: meta.company_id ?? COMPANY_OWNER.company_id,
+        username: meta.username || COMPANY_OWNER.displayUsername,
+        permanent: meta.permanent === true,
+        platform_super_admin: false,
+      },
+    });
   }
 
   if (existing) {
@@ -222,6 +280,13 @@ async function ensurePlatformAdmin(admin, { forcePassword = false } = {}) {
   return { user_id: data.user.id, created: true, password_synced: true };
 }
 
+function normalizeTenantOwnerRole(role) {
+  const raw = String(role || "").toLowerCase();
+  if (raw === "platform_owner") return "owner";
+  if (["owner", "super_admin", "admin", "manager", "cashier", "sales"].includes(raw)) return raw;
+  return "owner";
+}
+
 export async function ensurePermanentOwnerHandler(req, res) {
   applySecurityHeaders(res);
   if (req.method !== "POST") return methodNotAllowed(res);
@@ -237,10 +302,9 @@ export async function ensurePermanentOwnerHandler(req, res) {
     assertEnsureAuthorized(req, body);
     const admin = createAdminClient();
     const forcePassword = body.force_platform_password === true;
-    const [company, platform] = await Promise.all([
-      ensureCompanyOwner(admin),
-      ensurePlatformAdmin(admin, { forcePassword }),
-    ]);
+    // Platform first: frees support@ from any tenant account, then migrates Super Owner email.
+    const platform = await ensurePlatformAdmin(admin, { forcePassword });
+    const company = await ensureCompanyOwner(admin);
 
     // Keep public.profiles in sync — sales.user_id FK references profiles(id).
     const profileSync = { company_owner: null, platform_admin: null };

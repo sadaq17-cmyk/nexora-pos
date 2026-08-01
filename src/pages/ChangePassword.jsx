@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Lock } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
@@ -11,6 +11,11 @@ export default function ChangePassword() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [state, setState] = useState({ loading: false, error: "", success: false });
+  const navTimer = useRef(null);
+
+  useEffect(() => () => {
+    if (navTimer.current) window.clearTimeout(navTimer.current);
+  }, []);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -31,7 +36,7 @@ export default function ChangePassword() {
       return;
     }
     setState({ loading: false, error: "", success: true });
-    window.setTimeout(() => {
+    navTimer.current = window.setTimeout(() => {
       navigate(user?.role === "platform_owner" ? "/platform" : "/dashboard", { replace: true });
     }, 800);
   };

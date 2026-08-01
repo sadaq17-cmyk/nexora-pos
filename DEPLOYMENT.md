@@ -2,8 +2,8 @@
 
 Production-safe automatic and manual deployment to **Vercel**.
 
-**Live custom domain:** [https://www.httpsnexorapos.com](https://www.httpsnexorapos.com)  
-**Apex note:** Prefer the `www` host for the app. If the apex (`httpsnexorapos.com`) is also configured in Vercel, point it at the same project (redirect or alias); the pipelines verify the `www` URL.
+**Live custom domain:** [https://www.nexorapospro.com](https://www.nexorapospro.com)  
+**Apex note:** Prefer the `www` host for the app. If the apex (`nexorapospro.com`) is also configured in Vercel, point it at the same project (redirect or alias); the pipelines verify the `www` URL.
 
 ---
 
@@ -95,7 +95,7 @@ Lint **warnings** are allowed (`--max-warnings=99999`). Only genuine errors fail
 Key routes checked:
 
 - `/`, `/login`, `/dashboard`, `/pos`, `/owner-management`, `/users`, `/reports`
-- Custom: `https://www.httpsnexorapos.com/login`
+- Custom: `https://www.nexorapospro.com/login`
 
 ---
 

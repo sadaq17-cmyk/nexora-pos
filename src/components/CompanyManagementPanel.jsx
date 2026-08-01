@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Search, Plus, Building2, X } from "lucide-react";
 import CompanyAccountForm from "./CompanyAccountForm";
 import { useAuth } from "../context/AuthContext";
@@ -45,12 +45,16 @@ export default function CompanyManagementPanel({
   load,
   act,
   showToast,
+  pagination = { page: 1, page_size: 25, total: 0, total_pages: 1 },
+  page = 1,
+  setPage,
 }) {
   const { impersonate, user: actor } = useAuth();
   const [selected, setSelected] = useState(null);
   const [history, setHistory] = useState(null);
   const [historyKind, setHistoryKind] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const historyGen = useRef(0);
 
   const isSuperOwner = normalizeRole(actor?.role) === "platform_owner";
 
@@ -70,11 +74,13 @@ export default function CompanyManagementPanel({
   );
 
   const openHistory = async (company, kind) => {
+    const gen = ++historyGen.current;
     setHistoryKind(kind);
     setHistoryLoading(true);
     setHistory({ company, rows: [] });
     try {
       const result = await api.owner.getCompanyHistory(company.id);
+      if (gen !== historyGen.current) return;
       if (!result?.success) {
         showToast(result?.error || "Unable to load history");
         setHistory(null);
@@ -86,7 +92,7 @@ export default function CompanyManagementPanel({
           : result.subscription_history || [];
       setHistory({ company, rows: list, current: result.current_subscription });
     } finally {
-      setHistoryLoading(false);
+      if (gen === historyGen.current) setHistoryLoading(false);
     }
   };
 
@@ -331,6 +337,33 @@ export default function CompanyManagementPanel({
             })}
           </tbody>
         </table>
+        {typeof setPage === "function" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-app-border px-4 py-3 text-sm">
+            <span className="text-app-muted">
+              Page {pagination.page || page} of {pagination.total_pages || 1}
+              {" · "}
+              {pagination.total ?? companies.length} companies
+            </span>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-secondary text-xs"
+                disabled={(pagination.page || page) <= 1}
+                onClick={() => setPage(Math.max(1, (pagination.page || page) - 1))}
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                className="btn-secondary text-xs"
+                disabled={(pagination.page || page) >= (pagination.total_pages || 1)}
+                onClick={() => setPage((pagination.page || page) + 1)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {selected && (

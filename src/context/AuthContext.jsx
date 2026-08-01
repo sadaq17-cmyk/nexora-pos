@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { api } from "../lib/api";
 import { hasPermission, normalizeRole, isPlatformOwner, isOwner } from "../lib/rbac";
 import {
@@ -18,7 +18,12 @@ import {
   registerSession,
   touchSession,
 } from "../lib/securityCenter";
-import { resolveLoginEmail, bootstrapCompanyOwner, authFetch } from "../lib/authApi";
+import { resolveLoginEmail, publicSignup, authFetch } from "../lib/authApi";
+import {
+  PERMANENT_PLATFORM_ADMIN,
+  isPermanentPlatformAdminEmail,
+  isPermanentPlatformAdminUsername,
+} from "../lib/permanentPlatformAdmin";
 import {
   ACTIVITY_EVENTS,
   IDLE_TIMEOUT_MS,
@@ -31,6 +36,8 @@ import {
   getMfaAssurance,
   listTotpFactors,
 } from "../lib/mfaHelpers";
+import { requestOtp as requestOtpApi, verifyOtp as verifyOtpApi } from "../lib/otpApi";
+import { initRealtimeSync, stopRealtimeSync } from "../lib/realtimeSync";
 
 const AuthContext = createContext(null);
 
@@ -85,6 +92,8 @@ function mapSupabaseUser(sbUser, company = null) {
     email_verified: !!sbUser.email_confirmed_at,
     must_change_password: mustChange,
     force_logout_at: meta.force_logout_at || null,
+    sms_login_otp_enabled: meta.sms_login_otp_enabled === true,
+    otp_phone: meta.otp_phone || "",
     employee_id: meta.employee_id || "",
     department: meta.department || "",
     position: meta.position || "",
@@ -125,6 +134,12 @@ async function needsMfaStepUp(client) {
   } catch {
     return false;
   }
+}
+
+/** SMS OTP is an opt-in alternative to TOTP; skip it when TOTP MFA already gated this sign-in. */
+function needsSmsOtpStepUp(sbUser) {
+  const meta = sbUser?.app_metadata || {};
+  return Boolean(meta.sms_login_otp_enabled) && Boolean(meta.otp_phone);
 }
 
 async function gateAfterSignIn(sbUser) {
@@ -240,11 +255,21 @@ export function AuthProvider({ children }) {
   const mounted = useRef(true);
   const logoutRef = useRef(async () => {});
   const mfaPendingRef = useRef(false);
+  /** Pending SMS login-verification challenge: { user, isPlatformLogin, company, lockKey, email }. */
+  const smsOtpPendingRef = useRef(null);
+  /** Skip duplicate gateAfterSignIn when login() already hydrated the same user. */
+  const gatedUserIdRef = useRef(null);
+  const actionsRef = useRef({});
 
   const loadPermissions = useCallback(async () => {
     if (!api.permissions?.getMine) return;
-    const perms = await api.permissions.getMine();
-    if (mounted.current) setPermissions(perms || {});
+    try {
+      const perms = await api.permissions.getMine();
+      if (mounted.current) setPermissions(perms || {});
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn("[AuthContext] loadPermissions failed", err);
+      if (mounted.current) setPermissions({});
+    }
   }, []);
 
   useEffect(() => {
@@ -257,24 +282,35 @@ export function AuthProvider({ children }) {
     let subscription = null;
 
     (async () => {
+      const bootTimeoutMs = 18_000;
+      const withTimeout = (promise, ms, label) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            const t = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+            promise?.finally?.(() => clearTimeout(t));
+          }),
+        ]);
       try {
-        const { data } = await supabase.auth.getSession();
+        const { data } = await withTimeout(supabase.auth.getSession(), bootTimeoutMs, "getSession");
         if (data?.session?.user) {
-          if (isAbsoluteSessionExpired() || await needsMfaStepUp(supabase)) {
+          if (isAbsoluteSessionExpired() || await withTimeout(needsMfaStepUp(supabase), 8_000, "mfa")) {
             await supabase.auth.signOut();
             clearSessionStarted();
             setUser(null);
             setSubscriptionLocked(false);
             bridgeAuth(null);
           } else {
-            const gated = await gateAfterSignIn(data.session.user);
+            const gated = await withTimeout(gateAfterSignIn(data.session.user), bootTimeoutMs, "gate");
             if (gated.success) {
               markSessionStarted();
+              gatedUserIdRef.current = gated.user.id;
               setUser(gated.user);
               setSubscriptionLocked(Boolean(gated.subscriptionLocked));
               bridgeAuth(gated.user);
-              await loadPermissions();
+              await withTimeout(loadPermissions(), 10_000, "permissions").catch(() => {});
             } else {
+              gatedUserIdRef.current = null;
               setUser(null);
               setSubscriptionLocked(false);
               bridgeAuth(null);
@@ -284,7 +320,7 @@ export function AuthProvider({ children }) {
           bridgeAuth(null);
         }
       } catch (err) {
-        console.error("[AuthContext] getSession failed:", err);
+        if (import.meta.env.DEV) console.error("[AuthContext] getSession failed:", err);
         bridgeAuth(null);
       } finally {
         if (mounted.current) setLoading(false);
@@ -295,6 +331,7 @@ export function AuthProvider({ children }) {
       if (event === "SIGNED_OUT") {
         clearSessionStarted();
         mfaPendingRef.current = false;
+        gatedUserIdRef.current = null;
         setUser(null);
         setSubscriptionLocked(false);
         bridgeAuth(null);
@@ -315,19 +352,26 @@ export function AuthProvider({ children }) {
           const appUser = mapSupabaseUser(session.user);
           const company = await loadCompanyForUser(appUser);
           const withCompany = { ...appUser, company };
+          gatedUserIdRef.current = withCompany.id;
           setUser(withCompany);
           bridgeAuth(withCompany);
           return;
         }
         if (event === "SIGNED_IN" || event === "USER_UPDATED") {
+          // login()/loginByEmail already ran gateAfterSignIn for this user.
+          if (event === "SIGNED_IN" && gatedUserIdRef.current === session.user.id) {
+            return;
+          }
           const gated = await gateAfterSignIn(session.user);
           if (gated.success) {
             markSessionStarted();
+            gatedUserIdRef.current = gated.user.id;
             setUser(gated.user);
             setSubscriptionLocked(Boolean(gated.subscriptionLocked));
             bridgeAuth(gated.user);
             await loadPermissions();
           } else {
+            gatedUserIdRef.current = null;
             setUser(null);
             setSubscriptionLocked(false);
             bridgeAuth(null);
@@ -345,8 +389,8 @@ export function AuthProvider({ children }) {
   }, [loadPermissions]);
 
   useEffect(() => {
-    if (!user || typeof window === "undefined") return undefined;
-    markSessionStarted();
+    if (!user?.id || typeof window === "undefined") return undefined;
+    // Do NOT call markSessionStarted() here — TOKEN_REFRESHED / setUser must not reset the 12h clock.
     let lastActivity = Date.now();
     const onActivity = () => {
       lastActivity = Date.now();
@@ -366,7 +410,7 @@ export function AuthProvider({ children }) {
         window.removeEventListener(eventName, onActivity);
       }
     };
-  }, [user]);
+  }, [user?.id]);
 
   const finishRememberMeStorage = async (rememberMe, session) => {
     if (!session) return;
@@ -396,7 +440,9 @@ export function AuthProvider({ children }) {
       return { success: false, error: lock.error, code: lock.code };
     }
 
-    const isPlatformLogin = normalizedCompany === "platform";
+    // Canonical Super Owner scope — accept common aliases users type in the Platform field.
+    const PLATFORM_IDENTIFIERS = new Set(["platform", "nexora", "nexora-platform", "nexorapos", "super"]);
+    const isPlatformLogin = PLATFORM_IDENTIFIERS.has(normalizedCompany);
     let companyId = null;
     let company = null;
 
@@ -414,7 +460,13 @@ export function AuthProvider({ children }) {
 
     let email = normalizedIdentifier;
     const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedIdentifier);
-    if (!looksLikeEmail || isPlatformLogin) {
+    // Permanent Super Owner: never depend on resolve-login-email (avoids rate-limit → @invalid.local).
+    if (isPlatformLogin && (
+      isPermanentPlatformAdminUsername(normalizedIdentifier)
+      || isPermanentPlatformAdminEmail(normalizedIdentifier)
+    )) {
+      email = PERMANENT_PLATFORM_ADMIN.email;
+    } else if (!looksLikeEmail || isPlatformLogin) {
       const resolvedEmail = await resolveLoginEmail({
         company_id: isPlatformLogin ? "platform" : companyId,
         identifier: normalizedIdentifier,
@@ -422,6 +474,8 @@ export function AuthProvider({ children }) {
       });
       if (resolvedEmail.email) {
         email = resolvedEmail.email;
+      } else if (isPlatformLogin && isPermanentPlatformAdminUsername(normalizedIdentifier)) {
+        email = PERMANENT_PLATFORM_ADMIN.email;
       } else if (!looksLikeEmail) {
         email = normalizedIdentifier.includes("@") ? normalizedIdentifier : `${normalizedIdentifier}@invalid.local`;
       }
@@ -438,7 +492,12 @@ export function AuthProvider({ children }) {
           detail: "Failed sign-in attempt",
         });
         if (fail.locked) return { success: false, error: fail.error, code: fail.code };
-        return { success: false, error: "Invalid company identifier or credentials." };
+        return {
+          success: false,
+          error: isPlatformLogin
+            ? "Invalid platform username or password."
+            : "Invalid company identifier or credentials.",
+        };
       }
 
       await finishRememberMeStorage(rememberMe, data.session);
@@ -452,6 +511,23 @@ export function AuthProvider({ children }) {
           error: "Enter the 6-digit code from your authenticator app.",
         };
       }
+      if (needsSmsOtpStepUp(data.user)) {
+        const sent = await requestOtpApi({
+          purpose: "login",
+          channel: "sms",
+          identifier: data.user.app_metadata.otp_phone,
+          fallbackEmail: data.user.email,
+        });
+        smsOtpPendingRef.current = { user: data.user, isPlatformLogin, company, lockKey: lock.key, email };
+        return {
+          success: false,
+          code: "SMS_OTP_REQUIRED",
+          maskedPhone: sent?.masked_identifier || "",
+          error: sent?.success
+            ? "Enter the 6-digit code we texted to your phone."
+            : (sent?.error || "Unable to send the SMS code. Please try again."),
+        };
+      }
       const gated = await gateAfterSignIn(data.user);
       if (!gated.success) {
         recordLoginFailure(lock.key);
@@ -463,17 +539,24 @@ export function AuthProvider({ children }) {
         return gated;
       }
 
-      if (!isPlatformLogin && company) {
-        gated.user = {
-          ...gated.user,
-          company: {
-            id: company.id,
-            name: company.name,
-            code: company.code,
-            status: company.status,
-            logo: company.logo || "",
-          },
-        };
+      // Tenant isolation: typed company code MUST match the account's JWT company.
+      // Never overwrite JWT company identity with a Super Owner / foreign company.
+      if (!isPlatformLogin) {
+        const jwtCompanyId = gated.user?.company_id;
+        if (companyId != null && jwtCompanyId != null && String(companyId) !== String(jwtCompanyId)) {
+          await client.auth.signOut();
+          recordLoginFailure(lock.key);
+          recordSecurityActivity({
+            email,
+            type: "login_failed",
+            detail: "Company mismatch — account does not belong to typed company",
+          });
+          return {
+            success: false,
+            error: "This account does not belong to that company.",
+            code: "COMPANY_MISMATCH",
+          };
+        }
       }
 
       clearLoginAttempts(lock.key);
@@ -486,6 +569,7 @@ export function AuthProvider({ children }) {
         type: "login",
         detail: "Successful sign-in",
       });
+      gatedUserIdRef.current = gated.user.id;
       setUser(gated.user);
       setSubscriptionLocked(Boolean(gated.subscriptionLocked));
       bridgeAuth(gated.user);
@@ -570,6 +654,23 @@ export function AuthProvider({ children }) {
           error: "Enter the 6-digit code from your authenticator app.",
         };
       }
+      if (needsSmsOtpStepUp(data.user)) {
+        const sent = await requestOtpApi({
+          purpose: "login",
+          channel: "sms",
+          identifier: data.user.app_metadata.otp_phone,
+          fallbackEmail: data.user.email,
+        });
+        smsOtpPendingRef.current = { user: data.user, isPlatformLogin: false, company: null, lockKey: lock.key, email: normalizedEmail };
+        return {
+          success: false,
+          code: "SMS_OTP_REQUIRED",
+          maskedPhone: sent?.masked_identifier || "",
+          error: sent?.success
+            ? "Enter the 6-digit code we texted to your phone."
+            : (sent?.error || "Unable to send the SMS code. Please try again."),
+        };
+      }
       const gated = await gateAfterSignIn(data.user);
       if (!gated.success) {
         recordLoginFailure(lock.key);
@@ -579,6 +680,24 @@ export function AuthProvider({ children }) {
           detail: gated.error || "Sign-in blocked",
         });
         return gated;
+      }
+
+      if (companyId != null) {
+        const jwtCompanyId = gated.user?.company_id;
+        if (jwtCompanyId != null && String(companyId) !== String(jwtCompanyId)) {
+          await client.auth.signOut();
+          recordLoginFailure(lock.key);
+          recordSecurityActivity({
+            email: normalizedEmail,
+            type: "login_failed",
+            detail: "Company mismatch — account does not belong to typed company",
+          });
+          return {
+            success: false,
+            error: "This account does not belong to that company.",
+            code: "COMPANY_MISMATCH",
+          };
+        }
       }
 
       clearLoginAttempts(lock.key);
@@ -591,6 +710,7 @@ export function AuthProvider({ children }) {
         type: "login",
         detail: "Successful sign-in",
       });
+      gatedUserIdRef.current = gated.user.id;
       setUser(gated.user);
       setSubscriptionLocked(Boolean(gated.subscriptionLocked));
       bridgeAuth(gated.user);
@@ -630,6 +750,7 @@ export function AuthProvider({ children }) {
       const gated = await gateAfterSignIn(data.user);
       if (!gated.success) return gated;
       markSessionStarted();
+      gatedUserIdRef.current = gated.user.id;
       setUser(gated.user);
       setSubscriptionLocked(Boolean(gated.subscriptionLocked));
       bridgeAuth(gated.user);
@@ -647,11 +768,100 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const signup = async (payload = {}) => {
-    if (supabaseConfigError || !supabase) {
-      return { success: false, error: supabaseConfigError || "Supabase is not configured.", code: "CONFIG" };
+  const verifySmsOtpLogin = async (code) => {
+    const pending = smsOtpPendingRef.current;
+    if (!pending?.user) {
+      return { success: false, error: "No pending SMS verification. Please sign in again." };
     }
+    try {
+      const result = await verifyOtpApi({
+        purpose: "login",
+        channel: "sms",
+        identifier: pending.user.app_metadata?.otp_phone,
+        code,
+      });
+      if (!result?.success) {
+        return { success: false, error: result?.error || "Incorrect code.", attemptsRemaining: result?.attempts_remaining };
+      }
+      const gated = await gateAfterSignIn(pending.user);
+      if (!gated.success) {
+        recordLoginFailure(pending.lockKey);
+        recordSecurityActivity({ email: pending.email, type: "login_failed", detail: gated.error || "Sign-in blocked" });
+        smsOtpPendingRef.current = null;
+        return gated;
+      }
+      if (!pending.isPlatformLogin && pending.company) {
+        const jwtCompanyId = gated.user?.company_id;
+        if (
+          pending.company.id != null &&
+          jwtCompanyId != null &&
+          String(pending.company.id) !== String(jwtCompanyId)
+        ) {
+          await requireSupabase().auth.signOut();
+          recordLoginFailure(pending.lockKey);
+          smsOtpPendingRef.current = null;
+          return {
+            success: false,
+            error: "This account does not belong to that company.",
+            code: "COMPANY_MISMATCH",
+          };
+        }
+      }
+      clearLoginAttempts(pending.lockKey);
+      smsOtpPendingRef.current = false;
+      markSessionStarted();
+      registerSession(gated.user.id, { email: gated.user.email });
+      recordSecurityActivity({ userId: gated.user.id, email: gated.user.email, type: "login", detail: "Successful sign-in (SMS verified)" });
+      gatedUserIdRef.current = gated.user.id;
+      setUser(gated.user);
+      setSubscriptionLocked(Boolean(gated.subscriptionLocked));
+      bridgeAuth(gated.user);
+      setImpersonation(null);
+      impersonationOwnerSession = null;
+      await loadPermissions();
+      smsOtpPendingRef.current = null;
+      return {
+        success: true,
+        user: gated.user,
+        subscriptionLocked: Boolean(gated.subscriptionLocked),
+        mustChangePassword: Boolean(gated.user?.must_change_password),
+      };
+    } catch (err) {
+      return { success: false, error: err?.message || "Unable to verify SMS code." };
+    }
+  };
 
+  const enableSmsLoginOtp = async ({ phone, ticket }) => {
+    try {
+      const result = await authFetch("/api/admin-update-user", {
+        method: "POST",
+        body: { action: "set_sms_login_otp", enabled: true, phone, ticket },
+      });
+      if (result?.success && user) {
+        setUser({ ...user, sms_login_otp_enabled: true, otp_phone: result.otp_phone || phone });
+      }
+      return result || { success: false, error: "Unable to enable SMS login verification." };
+    } catch (err) {
+      return { success: false, error: err?.message || "Unable to enable SMS login verification." };
+    }
+  };
+
+  const disableSmsLoginOtp = async () => {
+    try {
+      const result = await authFetch("/api/admin-update-user", {
+        method: "POST",
+        body: { action: "set_sms_login_otp", enabled: false },
+      });
+      if (result?.success && user) {
+        setUser({ ...user, sms_login_otp_enabled: false });
+      }
+      return result || { success: false, error: "Unable to disable SMS login verification." };
+    } catch (err) {
+      return { success: false, error: err?.message || "Unable to disable SMS login verification." };
+    }
+  };
+
+  const signup = async (payload = {}) => {
     const email = String(payload.email || "").trim().toLowerCase();
     const password = String(payload.password || "");
     const name = String(payload.full_name || "").trim();
@@ -662,100 +872,73 @@ export function AuthProvider({ children }) {
       return { success: false, error: "Please provide valid signup details." };
     }
 
-    if (api.publicAuth?.companyNameTaken) {
-      const taken = await api.publicAuth.companyNameTaken(companyName);
-      if (taken) return { success: false, error: "A company with that name already exists.", code: "COMPANY_EXISTS" };
-    }
-
-    let signUpData;
-    try {
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: "https://www.httpsnexorapos.com/verify-email",
-          data: { name },
-        },
-      });
-      if (error) {
-        const msg = error.message || "Unable to create your account.";
-        if (/already|registered|exists/i.test(msg)) {
-          return { success: false, error: "An account already exists for this email.", code: "EMAIL_EXISTS" };
-        }
-        return { success: false, error: msg };
-      }
-      signUpData = data;
-    } catch (err) {
-      return { success: false, error: err?.message || "Unable to create your account." };
-    }
-
-    const supabaseUserId = signUpData?.user?.id;
-    if (!supabaseUserId) {
-      return { success: false, error: "Signup succeeded but no user id was returned. Contact support." };
-    }
-
-    const local = await api.publicAuth.createCompanyWorkspace({
+    // Server-side signup: creates Auth user with email_confirm:false (never
+    // triggers Supabase Auth's built-in confirmation email / rate limit) and
+    // delivers a 6-digit OTP via our Zoho SMTP / Resend transport.
+    const result = await publicSignup({
       company_name: companyName,
       full_name: name,
       email,
       phone,
-      plan_code: payload.plan_code,
-      supabase_user_id: supabaseUserId,
-    });
-    if (!local.success) {
-      console.error("[AuthContext.signup] Local company creation failed after Supabase signUp:", local);
-      return {
-        success: false,
-        error: local.error || "Your auth account was created but company setup failed. Contact support with your email.",
-        code: "PARTIAL_SIGNUP",
-        supabase_user_id: supabaseUserId,
-      };
-    }
-
-    const boot = await bootstrapCompanyOwner({
-      supabase_user_id: supabaseUserId,
-      email,
-      company_id: local.company_id,
-      branch_id: local.branch_id,
-      username: local.username,
-      name,
-      phone,
-      company_code: local.company_code,
-      company_name: companyName,
-      plan_code: "free_trial",
-      trial_ends_at: local.trial_ends_at,
-      currency: local.currency || "KES",
+      password,
+      plan_code: payload.plan_code || "free_trial",
+      country: payload.country,
+      country_code: payload.country_code,
+      currency: payload.currency || payload.currency_code,
+      currency_code: payload.currency_code || payload.currency,
+      currency_symbol: payload.currency_symbol,
+      locale: payload.locale,
     });
 
-    if (!boot.success) {
-      console.error("[AuthContext.signup] bootstrap-company-owner failed:", boot);
-      return {
-        success: false,
-        error: boot.error || "Your account and company were created but owner provisioning failed. Contact support.",
-        code: "BOOTSTRAP_FAILED",
-        company_code: local.company_code,
-        email,
-        supabase_user_id: supabaseUserId,
-      };
-    }
-
-    try {
-      await supabase.auth.signOut();
-    } catch {
-      /* ignore */
+    if (!result.success) {
+      const msg = String(result.error || "");
+      if (result.code === "RATE_LIMITED" || /rate.?limit|too many/i.test(msg)) {
+        return {
+          success: false,
+          error: "Too many signup attempts right now. Please wait about a minute and try again.",
+          code: "RATE_LIMITED",
+          retry_after: result.retry_after || 60,
+        };
+      }
+      if (result.code === "EMAIL_EXISTS" || /already exists|already registered/i.test(msg)) {
+        return { success: false, error: "An account already exists for this email. Sign in, or reset your password if you forgot it.", code: "EMAIL_EXISTS" };
+      }
+      if (result.code === "COMPANY_EXISTS") {
+        return { success: false, error: "A company with that name already exists.", code: "COMPANY_EXISTS" };
+      }
+      return { success: false, error: result.error || "Unable to create your account.", code: result.code };
     }
 
     return {
       success: true,
-      company_code: local.company_code,
+      needs_email_otp: true,
+      otp_sent: result.otp_sent !== false,
+      company_code: result.company_code,
       email,
-      username: local.username,
-      email_delivery_configured: true,
+      phone,
+      username: result.username,
+      email_delivery_configured: result.email_delivery_configured !== false && result.otp_sent !== false,
+      email_error: result.email_error,
+      expires_at: result.expires_at,
+      resend_after: result.resend_after || 60,
+      masked_identifier: result.masked_identifier,
+      currency: result.currency_code || result.currency,
+      currency_code: result.currency_code || result.currency,
+      currency_symbol: result.currency_symbol,
+      locale: result.locale,
+      country: result.country,
+      country_code: result.country_code,
+      company_id: result.company_id,
+      branch_id: result.branch_id,
+      supabase_user_id: result.supabase_user_id,
+      trial_ends_at: result.trial_ends_at,
+      plan_code: result.plan_code,
     };
   };
 
   const logout = async () => {
     mfaPendingRef.current = false;
+    gatedUserIdRef.current = null;
     clearSessionStarted();
     if (user?.id) {
       recordSecurityActivity({
@@ -768,7 +951,7 @@ export function AuthProvider({ children }) {
     try {
       if (supabase) await supabase.auth.signOut({ scope: "local" });
     } catch (err) {
-      console.error("[AuthContext] signOut error:", err);
+      if (import.meta.env.DEV) console.error("[AuthContext] signOut error:", err);
     }
     setUser(null);
     setSubscriptionLocked(false);
@@ -782,6 +965,7 @@ export function AuthProvider({ children }) {
   const logoutAllDevices = async () => {
     const activeUser = user;
     mfaPendingRef.current = false;
+    gatedUserIdRef.current = null;
     clearSessionStarted();
     if (activeUser?.id) {
       clearAllSessions(activeUser.id);
@@ -795,7 +979,7 @@ export function AuthProvider({ children }) {
     try {
       if (supabase) await supabase.auth.signOut({ scope: "global" });
     } catch (err) {
-      console.error("[AuthContext] global signOut error:", err);
+      if (import.meta.env.DEV) console.error("[AuthContext] global signOut error:", err);
     }
     setUser(null);
     setSubscriptionLocked(false);
@@ -826,13 +1010,25 @@ export function AuthProvider({ children }) {
     };
   }, [user?.id, user?.email]);
 
-  const can = (module, action = "view") => {
-    return hasPermission(user?.role, module, action, { [user?.role]: permissions });
-  };
+  // Enterprise ERP real-time sync: one Supabase Realtime channel per signed-in
+  // company, feeding every open tab/page's useRealtimeRefresh() subscribers.
+  useEffect(() => {
+    const companyId = user && !isPlatformOwner(user.role) ? user.company_id : null;
+    if (companyId == null || companyId === "") {
+      stopRealtimeSync();
+      return undefined;
+    }
+    initRealtimeSync(companyId);
+    return () => stopRealtimeSync();
+  }, [user?.company_id, user?.role]);
 
-  const refreshPermissions = async () => {
+  const can = useCallback((module, action = "view") => {
+    return hasPermission(user?.role, module, action, { [user?.role]: permissions });
+  }, [user?.role, permissions]);
+
+  const refreshPermissions = useCallback(async () => {
     await loadPermissions();
-  };
+  }, [loadPermissions]);
 
   const impersonate = async (targetId) => {
     if (!supabase) return { success: false, error: "Supabase is not configured." };
@@ -1087,7 +1283,7 @@ export function AuthProvider({ children }) {
         body: { action: "clear_must_change_password" },
       });
       if (!cleared.success) {
-        console.warn("[changePassword] clear flag failed:", cleared.error);
+        if (import.meta.env.DEV) console.warn("[changePassword] clear flag failed:", cleared.error);
       }
       markMustChangeClearedLocally(user.id);
 
@@ -1099,7 +1295,7 @@ export function AuthProvider({ children }) {
         password: newPassword,
       });
       if (reauthError) {
-        console.warn("[changePassword] re-auth after update failed:", reauthError.message);
+        if (import.meta.env.DEV) console.warn("[changePassword] re-auth after update failed:", reauthError.message);
         await supabase.auth.refreshSession().catch(() => null);
       }
       const sessionUser = signedIn?.user || (await supabase.auth.getUser()).data?.user || null;
@@ -1133,6 +1329,7 @@ export function AuthProvider({ children }) {
     if (!data?.session?.user) return { success: false };
     const gated = await gateAfterSignIn(data.session.user);
     if (gated.success) {
+      gatedUserIdRef.current = gated.user.id;
       setUser(gated.user);
       setSubscriptionLocked(Boolean(gated.subscriptionLocked));
       bridgeAuth(gated.user);
@@ -1172,31 +1369,89 @@ export function AuthProvider({ children }) {
 
   const mustChangePassword = Boolean(user?.must_change_password);
 
+  actionsRef.current = {
+    login,
+    loginByEmail,
+    verifyMfa,
+    verifySmsOtpLogin,
+    enableSmsLoginOtp,
+    disableSmsLoginOtp,
+    signup,
+    logout,
+    impersonate,
+    stopImpersonation,
+    changePassword,
+    updateOwnerAccount,
+    logoutAllDevices,
+    refreshSessionGate,
+  };
+
+  const stableLogin = useCallback((...args) => actionsRef.current.login(...args), []);
+  const stableLoginByEmail = useCallback((...args) => actionsRef.current.loginByEmail(...args), []);
+  const stableVerifyMfa = useCallback((...args) => actionsRef.current.verifyMfa(...args), []);
+  const stableVerifySmsOtpLogin = useCallback((...args) => actionsRef.current.verifySmsOtpLogin(...args), []);
+  const stableEnableSmsLoginOtp = useCallback((...args) => actionsRef.current.enableSmsLoginOtp(...args), []);
+  const stableDisableSmsLoginOtp = useCallback((...args) => actionsRef.current.disableSmsLoginOtp(...args), []);
+  const stableSignup = useCallback((...args) => actionsRef.current.signup(...args), []);
+  const stableLogout = useCallback((...args) => actionsRef.current.logout(...args), []);
+  const stableImpersonate = useCallback((...args) => actionsRef.current.impersonate(...args), []);
+  const stableStopImpersonation = useCallback((...args) => actionsRef.current.stopImpersonation(...args), []);
+  const stableChangePassword = useCallback((...args) => actionsRef.current.changePassword(...args), []);
+  const stableUpdateOwnerAccount = useCallback((...args) => actionsRef.current.updateOwnerAccount(...args), []);
+  const stableLogoutAllDevices = useCallback((...args) => actionsRef.current.logoutAllDevices(...args), []);
+  const stableRefreshSessionGate = useCallback((...args) => actionsRef.current.refreshSessionGate(...args), []);
+
+  const value = useMemo(() => ({
+    user,
+    login: stableLogin,
+    loginByEmail: stableLoginByEmail,
+    verifyMfa: stableVerifyMfa,
+    verifySmsOtpLogin: stableVerifySmsOtpLogin,
+    enableSmsLoginOtp: stableEnableSmsLoginOtp,
+    disableSmsLoginOtp: stableDisableSmsLoginOtp,
+    signup: stableSignup,
+    logout: stableLogout,
+    loading,
+    permissions,
+    can,
+    refreshPermissions,
+    impersonation,
+    impersonate: stableImpersonate,
+    stopImpersonation: stableStopImpersonation,
+    changePassword: stableChangePassword,
+    updateOwnerAccount: stableUpdateOwnerAccount,
+    logoutAllDevices: stableLogoutAllDevices,
+    refreshSessionGate: stableRefreshSessionGate,
+    subscriptionLocked,
+    mustChangePassword,
+    configError: supabaseConfigError,
+  }), [
+    user,
+    loading,
+    permissions,
+    can,
+    refreshPermissions,
+    impersonation,
+    subscriptionLocked,
+    mustChangePassword,
+    stableLogin,
+    stableLoginByEmail,
+    stableVerifyMfa,
+    stableVerifySmsOtpLogin,
+    stableEnableSmsLoginOtp,
+    stableDisableSmsLoginOtp,
+    stableSignup,
+    stableLogout,
+    stableImpersonate,
+    stableStopImpersonation,
+    stableChangePassword,
+    stableUpdateOwnerAccount,
+    stableLogoutAllDevices,
+    stableRefreshSessionGate,
+  ]);
+
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        login,
-        loginByEmail,
-        verifyMfa,
-        signup,
-        logout,
-        loading,
-        permissions,
-        can,
-        refreshPermissions,
-        impersonation,
-        impersonate,
-        stopImpersonation,
-        changePassword,
-        updateOwnerAccount,
-        logoutAllDevices,
-        refreshSessionGate,
-        subscriptionLocked,
-        mustChangePassword,
-        configError: supabaseConfigError,
-      }}
-    >
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

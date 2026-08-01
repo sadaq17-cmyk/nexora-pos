@@ -64,7 +64,7 @@ async function posOrEmpty(action, params, empty) {
       code === "CONFIG" ||
       code === "CSRF_ORIGIN"
     ) {
-      if (code === "POS_ERROR") console.error("[supabaseApi]", action, result.error);
+      if (code === "POS_ERROR" && import.meta.env.DEV) console.error("[supabaseApi]", action, result.error);
       return empty;
     }
   }

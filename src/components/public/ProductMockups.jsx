@@ -85,7 +85,7 @@ function MockFrame({ title, activeNav = "Dashboard", children, wide }) {
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#FBBF24" }} />
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#34D399" }} />
         <span style={{ marginLeft: 10, color: "rgba(255,255,255,0.75)", fontSize: 10, fontWeight: 600 }}>
-          Nexora POS · {title}
+          Nexora POS Pro · {title}
         </span>
       </div>
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>

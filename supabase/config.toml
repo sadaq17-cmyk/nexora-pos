@@ -1,0 +1,11 @@
+project_id = "ohrpezhlnjwiilojdqbo"
+
+# Africa's Talking SMS — server-to-server only. verify_jwt requires every
+# caller to present a valid Supabase JWT (the Vercel backend calls this with
+# the service-role key); the function itself additionally checks the JWT
+# `role` claim is "service_role" so anon/authenticated user tokens are
+# rejected even if leaked. This keeps the Africa's Talking API key and the
+# SMS-sending capability fully server-side — never reachable from the
+# frontend.
+[functions.send-sms]
+verify_jwt = true

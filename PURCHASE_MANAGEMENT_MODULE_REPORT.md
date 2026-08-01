@@ -14,7 +14,7 @@ Enterprise Purchase Management is upgraded on the existing Nexora purchases sche
 |------|--------|
 | `npm run build` | **PASS** |
 | Migration `016` `supabase db push --linked` | **PASS** (applied) |
-| Vercel production deploy | **PASS** — https://www.httpsnexorapos.com (alias); inspect https://vercel.com/nexoraposapp/nexora-pos/AHg9iET4jnje6J2RmEGRhz7c7Prn |
+| Vercel production deploy | **PASS** — https://www.nexorapospro.com (alias); inspect https://vercel.com/nexoraposapp/nexora-pos/AHg9iET4jnje6J2RmEGRhz7c7Prn |
 | Git commit | **Not requested** — skipped |
 
 ---

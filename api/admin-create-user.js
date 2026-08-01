@@ -75,6 +75,31 @@ export default async function handler(req, res) {
 
   try {
     const admin = createAdminClient();
+
+    // A branch must exist, belong to the SAME company as the new user, and
+    // be active — otherwise a user can be created scoped to another
+    // tenant's branch (or a nonexistent one).
+    if (branchId != null && branchId !== "" && !isPlatformOwner(role)) {
+      const { data: branchRow, error: branchLookupError } = await admin
+        .from("branches")
+        .select("id, company_id, active")
+        .eq("id", branchId)
+        .maybeSingle();
+      if (branchLookupError) {
+        console.error("[admin-create-user] branch lookup failed", branchLookupError);
+        return jsonError(res, 502, "Unable to verify the selected branch. Please try again.", "BRANCH_LOOKUP_FAILED");
+      }
+      if (!branchRow) {
+        return jsonError(res, 400, "The selected branch does not exist.", "BRANCH_NOT_FOUND");
+      }
+      if (String(branchRow.company_id) !== String(assignedCompanyId)) {
+        return jsonError(res, 400, "The selected branch does not belong to this company.", "BRANCH_COMPANY_MISMATCH");
+      }
+      if (branchRow.active === false) {
+        return jsonError(res, 400, "The selected branch is inactive.", "BRANCH_INACTIVE");
+      }
+    }
+
     const existing = await listAllAuthUsers(admin);
     const companyUsers = existing.filter((user) => {
       const meta = user.app_metadata || {};

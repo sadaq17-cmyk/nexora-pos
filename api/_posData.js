@@ -106,15 +106,16 @@ function denyPurchase(actionLabel) {
  * file. SECURITY CRITICAL: must fail CLOSED, never open.
  *
  * - Tenant callers always filter by their company_id (missing → empty set).
- * - Platform Owner may query across tenants ONLY when no companyId scope is set.
- * - When platform is scoped/impersonating (companyId present), filter applies.
+ * - Platform Owner operational queries also fail closed without companyId
+ *   (platform.* / owner.* APIs use dedicated handlers, not this filter).
  */
 function companyFilter(query, companyId, platform) {
   if (companyId == null || companyId === "") {
-    if (platform) return query;
+    if (platform) {
+      // Never return unscoped tenant rows for operational POS actions.
+      return query.eq("company_id", -1);
+    }
     console.warn("[companyFilter] missing company_id for a non-platform caller — returning empty result set (fail-closed)");
-    // No tenant can ever have id -1; this guarantees zero rows instead of
-    // leaking every tenant's data when company context fails to resolve.
     return query.eq("company_id", -1);
   }
   return query.eq("company_id", companyId);
@@ -7187,8 +7188,11 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       if (companyId == null || companyId === "") {
         return { success: false, error: "Company context required.", code: "NO_COMPANY" };
       }
-      if (String(caller.role || "") === "cashier" || String(caller.role || "") === "sales") {
-        return { success: false, error: "Insufficient permissions to edit roles.", code: "FORBIDDEN" };
+      {
+        const role = normalizeRole(caller.role);
+        if (!["owner", "super_admin", "admin"].includes(role)) {
+          return { success: false, error: "Only Owner or Admin can edit the permission matrix.", code: "FORBIDDEN" };
+        }
       }
       const { data: existing } = await admin
         .from("company_settings")

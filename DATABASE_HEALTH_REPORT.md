@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-20  
 **Project:** `ohrpezhlnjwiilojdqbo` (`https://ohrpezhlnjwiilojdqbo.supabase.co`)  
-**Production host:** https://www.httpsnexorapos.com  
+**Production host:** https://www.nexorapospro.com  
 **Deploy:** `dpl_Bg9PUe6WatBqfRA6nSzqZ3DzfJKV` → https://nexora-1tsfyqpdn-nexoraposapp.vercel.app  
 **Inspector:** https://vercel.com/nexoraposapp/nexora-pos/Bg9PUe6WatBqfRA6nSzqZ3DzfJKV
 
@@ -69,7 +69,7 @@ Anon key REST `select * limit 1` on products, suppliers, categories, sales, cust
 
 | Check | Result |
 |-------|--------|
-| Deploy aliased to www.httpsnexorapos.com | PASS (`dpl_Bg9PUe6WatBqfRA6nSzqZ3DzfJKV`) |
+| Deploy aliased to www.nexorapospro.com | PASS (`dpl_Bg9PUe6WatBqfRA6nSzqZ3DzfJKV`) |
 | `POST /api/pos` `health.probe` | PASS 30/30 |
 | Key tables (products, suppliers, categories, sales, customers, companies, invoice_verifications) | PASS |
 | `pos_create_sale` RPC | PASS |

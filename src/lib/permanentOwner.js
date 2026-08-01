@@ -1,6 +1,7 @@
 export const PERMANENT_COMPANY_OWNER = Object.freeze({
   username: "Owner@Honest",
-  email: "support@httpsnexorapos.com",
+  // Company Owner login (support@httpsnexorapos.com is reserved for Super Owner).
+  email: "owner@httpsnexorapos.com",
   name: "Honest Company Owner",
   role: "owner",
   company_id: 1,

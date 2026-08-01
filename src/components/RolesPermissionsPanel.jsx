@@ -51,12 +51,17 @@ export default function RolesPermissionsPanel({ embedded = false }) {
   const [newRole, setNewRole] = useState({ label: "", description: "", cloneFrom: "cashier" });
 
   const load = async () => {
-    const matrixPayload = await api.permissions.getMatrix();
-    setData(matrixPayload);
-    if (!matrixPayload.roles?.some((role) => role.id === selectedRole)) {
-      setSelectedRole(matrixPayload.roles?.[0]?.id || "admin");
+    try {
+      const matrixPayload = await api.permissions.getMatrix();
+      setData(matrixPayload);
+      if (!matrixPayload.roles?.some((role) => role.id === selectedRole)) {
+        setSelectedRole(matrixPayload.roles?.[0]?.id || "admin");
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[RolesPermissions] load failed", err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -178,7 +183,7 @@ export default function RolesPermissionsPanel({ embedded = false }) {
           <div>
             <h1 className="page-title">Roles & Permissions</h1>
             <p className="mt-1 text-base text-app-muted">
-              Configure fine-grained access for every role across Nexora POS Enterprise.
+              Configure fine-grained access for every role across Nexora POS Pro.
             </p>
           </div>
         </div>

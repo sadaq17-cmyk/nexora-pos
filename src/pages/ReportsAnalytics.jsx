@@ -12,6 +12,7 @@ import { useAuth } from "../context/AuthContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { getReportRange, REPORT_PERIODS } from "../lib/reportDates";
 import { exportCsv, exportExcel, exportPdf, printReport } from "../lib/reportExport";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { PageSkeleton } from "@/components/ui/skeleton";
 
 const COLORS = ["var(--chart-1)", "var(--chart-3)", "var(--chart-5)", "var(--chart-2)", "var(--chart-4)", "var(--chart-6)"];
@@ -117,6 +118,14 @@ export default function ReportsAnalytics() {
   }, []);
 
   useEffect(() => { load(filters); }, [filters, load]);
+
+  // ERP real-time: every sale, purchase, expense, or return recalculates
+  // these reports automatically — no manual refresh required.
+  useRealtimeRefresh(
+    ["sales", "purchases", "inventory", "expenses", "customers", "suppliers"],
+    () => load(filters),
+    { debounceMs: 1200 }
+  );
 
   const setFilter = (key, value) => setFilters((current) => ({
     ...current,

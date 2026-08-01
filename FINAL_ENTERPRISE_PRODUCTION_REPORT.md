@@ -3,7 +3,7 @@
 **Date:** 2026-07-20  
 **Auditor:** Automated enterprise production deployment pass  
 **Workspace:** `C:\Users\sadam\Downloads\nexora-pos-final\nexora-pos`  
-**Production URL:** https://www.httpsnexorapos.com  
+**Production URL:** https://www.nexorapospro.com  
 **Final verdict:** **COMPLETE** (with documented interactive SKIPs)
 
 ---
@@ -18,7 +18,7 @@
 | Tests passed | auth-logic 19 · owner-email 10 · receipt-codes · feature-smoke 90 · RLS static · runtime-api · production-verification 18 PASS / 0 FAIL / 8 SKIP |
 | Build status | **PASS** (`npm run build` exit 0; ESLint 0 errors / 18 warnings) |
 | Deployment status | **PASS** (1st attempt network `fetch failed`; retry succeeded) |
-| Production URL | https://www.httpsnexorapos.com |
+| Production URL | https://www.nexorapospro.com |
 | Health check | **PASS** — all probed tables `ok:true`; `invoice_verifications` `ok`; `pos_create_sale` present (`code:22023` empty-payload validation) |
 | Final verdict | **COMPLETE** |
 
@@ -32,7 +32,7 @@ Interactive login / POS / reports smoke remain **SKIP** (no authorized productio
 |-------|--------|
 | Deploy ID | `dpl_B4GpV7SpEYUDfh14VbfAUrqDFSEh` |
 | Deployment URL | https://nexora-n4ks08w03-nexoraposapp.vercel.app |
-| Production alias | https://www.httpsnexorapos.com |
+| Production alias | https://www.nexorapospro.com |
 | Inspect | https://vercel.com/nexoraposapp/nexora-pos/B4GpV7SpEYUDfh14VbfAUrqDFSEh |
 | Asset hashes (live) | `/assets/index-oJfEh43y.js` · `/assets/index-DPDWcDKF.css` |
 | Bundle checks | Contains `/api/pos`; **no** `nexora_pos_web_db`; **no** `Honest@2026`; **no** service-role key |

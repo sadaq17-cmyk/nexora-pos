@@ -82,7 +82,7 @@ export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurren
 
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11);
-  doc.text(settings.store_name || "Nexora POS Enterprise", 40, y, { align: "center" });
+  doc.text(settings.store_name || "Nexora POS Pro", 40, y, { align: "center" });
   y += 6;
   doc.setFont("helvetica", "normal");
   doc.setFontSize(7);

@@ -47,8 +47,8 @@ export default function InvoiceVerify() {
   return (
     <div className="mx-auto max-w-xl px-4 py-10">
       <Seo
-        title={`Invoice ${invoiceId || ""} | Nexora POS`}
-        description="Verify a Nexora POS Enterprise receipt."
+        title={`Invoice ${invoiceId || ""} | Nexora POS Pro`}
+        description="Verify a Nexora POS Pro receipt."
       />
       <div className="mb-6 flex items-center gap-3">
         <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0f766e] text-white">
@@ -119,7 +119,7 @@ export default function InvoiceVerify() {
 
       <div className="mt-6 text-center text-sm">
         <Link to="/" className="font-semibold text-[#0f766e] hover:underline">
-          Back to Nexora POS
+          Back to Nexora POS Pro
         </Link>
       </div>
     </div>

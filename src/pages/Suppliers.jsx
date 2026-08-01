@@ -12,8 +12,17 @@ import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import CurrencyMoneyFields from "../components/CurrencyMoneyFields";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { DEFAULT_PAGE_SIZE } from "../lib/requestCache";
+import {
+  entryTypeLabel,
+  printSupplierStatement,
+  exportSupplierStatementExcel,
+  exportSupplierStatementPdf,
+  buildSupplierStatementPdfBase64,
+  buildStatementRows,
+} from "../lib/supplierStatementExport";
 
 const emptyForm = {
   name: "",
@@ -24,7 +33,8 @@ const emptyForm = {
   tax_number: "",
   payment_terms: "Net 30",
   credit_limit: "",
-  opening_balance: "",
+  opening_debit: "",
+  opening_credit: "",
   notes: "",
   status: "Active",
 };
@@ -47,7 +57,56 @@ const REPORT_TABS = [
   { id: "purchases", label: "Purchase History" },
   { id: "payments", label: "Payment History" },
   { id: "top", label: "Top Suppliers" },
+  { id: "statement", label: "Statement" },
 ];
+
+const STATEMENT_DATE_PRESETS = [
+  { id: "today", label: "Today" },
+  { id: "week", label: "This Week" },
+  { id: "month", label: "This Month" },
+  { id: "lastmonth", label: "Last Month" },
+  { id: "custom", label: "Custom Date" },
+  { id: "all", label: "All Time" },
+];
+
+const ENTRY_TYPE_OPTIONS = [
+  { id: "debit_note", label: "Debit Note (increases balance)" },
+  { id: "credit_note", label: "Credit Note (reduces balance)" },
+  { id: "adjustment", label: "Manual Adjustment" },
+];
+
+function isoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+function startOfWeek(d) {
+  const date = new Date(d);
+  const day = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - day);
+  return date;
+}
+function endOfWeek(d) {
+  const s = startOfWeek(d);
+  const e = new Date(s);
+  e.setDate(e.getDate() + 6);
+  return e;
+}
+function startOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function endOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0);
+}
+function computeStatementRange(preset) {
+  const now = new Date();
+  if (preset === "today") return [isoDate(now), isoDate(now)];
+  if (preset === "week") return [isoDate(startOfWeek(now)), isoDate(endOfWeek(now))];
+  if (preset === "month") return [isoDate(startOfMonth(now)), isoDate(endOfMonth(now))];
+  if (preset === "lastmonth") {
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return [isoDate(startOfMonth(prev)), isoDate(endOfMonth(prev))];
+  }
+  return [null, null];
+}
 
 const SORT_OPTIONS = [
   { id: "name-asc", label: "Name A–Z", key: "name", dir: 1 },
@@ -94,10 +153,16 @@ function downloadCsv(filename, rows) {
   URL.revokeObjectURL(url);
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]
+  ));
+}
+
 function openPrintWindow(title, bodyHtml) {
   const win = window.open("", "_blank", "noopener,noreferrer,width=920,height=720");
   if (!win) return null;
-  win.document.write(`<!doctype html><html><head><title>${title}</title>
+  win.document.write(`<!doctype html><html><head><title>${escapeHtml(title)}</title>
     <style>
       body{font-family:Segoe UI,Arial,sans-serif;padding:24px;color:#1B2439}
       h1{font-size:20px;margin:0 0 4px} .muted{color:#6B7690;font-size:12px}
@@ -118,23 +183,23 @@ function printStatement(supplier, statement, money) {
     .map(
       (e) =>
         `<tr>
-          <td>${fmtDate(e.entry_date)}</td>
-          <td>${e.entry_type || ""}</td>
-          <td>${e.reference || ""}</td>
-          <td>${e.description || ""}</td>
-          <td style="text-align:right">${Number(e.debit) ? money(e.debit) : ""}</td>
-          <td style="text-align:right">${Number(e.credit) ? money(e.credit) : ""}</td>
+          <td>${escapeHtml(fmtDate(e.entry_date))}</td>
+          <td>${escapeHtml(e.entry_type || "")}</td>
+          <td>${escapeHtml(e.reference || "")}</td>
+          <td>${escapeHtml(e.description || "")}</td>
+          <td style="text-align:right">${Number(e.debit) ? escapeHtml(money(e.debit)) : ""}</td>
+          <td style="text-align:right">${Number(e.credit) ? escapeHtml(money(e.credit)) : ""}</td>
         </tr>`
     )
     .join("");
   openPrintWindow(
     `Supplier Statement — ${supplier.name}`,
-    `<h1>${supplier.name}</h1>
-    <div class="muted">${supplier.code || ""} · ${supplier.tax_number ? `Tax PIN ${supplier.tax_number} · ` : ""}${supplier.payment_terms || ""}</div>
+    `<h1>${escapeHtml(supplier.name)}</h1>
+    <div class="muted">${escapeHtml(supplier.code || "")} · ${supplier.tax_number ? `Tax PIN ${escapeHtml(supplier.tax_number)} · ` : ""}${escapeHtml(supplier.payment_terms || "")}</div>
     <div class="kpis">
-      <div class="kpi"><div class="muted">Total Purchases</div><strong>${money(supplier.total_ordered)}</strong></div>
-      <div class="kpi"><div class="muted">Total Paid</div><strong>${money(supplier.total_paid)}</strong></div>
-      <div class="kpi"><div class="muted">Outstanding</div><strong>${money(supplier.balance)}</strong></div>
+      <div class="kpi"><div class="muted">Total Purchases</div><strong>${escapeHtml(money(supplier.total_ordered))}</strong></div>
+      <div class="kpi"><div class="muted">Total Paid</div><strong>${escapeHtml(money(supplier.total_paid))}</strong></div>
+      <div class="kpi"><div class="muted">Outstanding</div><strong>${escapeHtml(money(supplier.balance))}</strong></div>
     </div>
     <table><thead><tr><th>Date</th><th>Type</th><th>Ref</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6">No ledger entries</td></tr>'}</tbody></table>`
@@ -143,21 +208,20 @@ function printStatement(supplier, statement, money) {
 
 function printPaymentReceipt(supplier, payment, money) {
   if (!payment) return;
+  const amountLabel = payment.payment_currency
+    ? `${payment.payment_currency} ${Number(payment.original_amount ?? payment.amount).toLocaleString()}`
+    : money(payment.amount);
   openPrintWindow(
     `Payment Receipt — ${supplier.name}`,
     `<h1>Supplier Payment Receipt</h1>
-    <div class="muted">Nexora POS · ${fmtDate(payment.created_at || payment.payment_date)}</div>
+    <div class="muted">Nexora POS Pro · ${escapeHtml(fmtDate(payment.created_at || payment.payment_date))}</div>
     <div class="kpis">
-      <div class="kpi"><div class="muted">Supplier</div><strong>${supplier.name}</strong></div>
-      <div class="kpi"><div class="muted">Method</div><strong>${payment.method || "Cash"}</strong></div>
-      <div class="kpi"><div class="muted">Amount</div><strong>${
-        payment.payment_currency
-          ? `${payment.payment_currency} ${Number(payment.original_amount ?? payment.amount).toLocaleString()}`
-          : money(payment.amount)
-      }</strong></div>
+      <div class="kpi"><div class="muted">Supplier</div><strong>${escapeHtml(supplier.name)}</strong></div>
+      <div class="kpi"><div class="muted">Method</div><strong>${escapeHtml(payment.method || "Cash")}</strong></div>
+      <div class="kpi"><div class="muted">Amount</div><strong>${escapeHtml(amountLabel)}</strong></div>
     </div>
-    <p class="muted">Reference: ${payment.reference || payment.id || "—"}</p>
-    <p class="muted">Outstanding after payment: ${money(supplier.balance)}</p>`
+    <p class="muted">Reference: ${escapeHtml(payment.reference || payment.id || "—")}</p>
+    <p class="muted">Outstanding after payment: ${escapeHtml(money(supplier.balance))}</p>`
   );
 }
 
@@ -166,16 +230,16 @@ function printSupplierDirectory(rows, money) {
     .map(
       (s) =>
         `<tr>
-          <td>${s.code || ""}</td><td>${s.name}</td><td>${s.contact_person || ""}</td>
-          <td>${s.phone || ""}</td><td>${money(s.total_ordered)}</td>
-          <td>${money(s.total_paid)}</td><td>${money(s.balance)}</td><td>${supplierStatus(s)}</td>
+          <td>${escapeHtml(s.code || "")}</td><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.contact_person || "")}</td>
+          <td>${escapeHtml(s.phone || "")}</td><td>${escapeHtml(money(s.total_ordered))}</td>
+          <td>${escapeHtml(money(s.total_paid))}</td><td>${escapeHtml(money(s.balance))}</td><td>${escapeHtml(supplierStatus(s))}</td>
         </tr>`
     )
     .join("");
   openPrintWindow(
     "Supplier Directory",
     `<h1>Supplier Directory</h1>
-    <div class="muted">Printed ${new Date().toLocaleString()}</div>
+    <div class="muted">Printed ${escapeHtml(new Date().toLocaleString())}</div>
     <table><thead><tr><th>Code</th><th>Supplier</th><th>Contact</th><th>Phone</th><th>Purchases</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
     <tbody>${body || '<tr><td colspan="8">No suppliers</td></tr>'}</tbody></table>`
   );
@@ -213,7 +277,7 @@ async function exportSuppliersPdf(rows, money) {
   const doc = new jsPDF({ orientation: "landscape" });
   doc.setFontSize(14);
   doc.setTextColor(37, 99, 235);
-  doc.text("Nexora POS — Supplier Directory", 14, 16);
+  doc.text("Nexora POS Pro — Supplier Directory", 14, 16);
   doc.setFontSize(9);
   doc.setTextColor(90, 102, 125);
   doc.text(`Generated ${new Date().toLocaleString()}`, 14, 22);
@@ -247,6 +311,377 @@ async function exportSuppliersPdf(rows, money) {
     doc.text(`…and ${rows.length - 40} more (export Excel/CSV for full list)`, 14, y + 4);
   }
   doc.save(`suppliers-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
+function SupplierStatementReport({ suppliers }) {
+  const { formatMoney: money } = useEnterpriseSettings();
+  const { can } = useAuth();
+  const { showToast } = useToast();
+  const [branches, setBranches] = useState([]);
+  const [supplierId, setSupplierId] = useState("");
+  const [branchId, setBranchId] = useState("");
+  const [datePreset, setDatePreset] = useState("month");
+  const [customStart, setCustomStart] = useState(isoDate(new Date()));
+  const [customEnd, setCustomEnd] = useState(isoDate(new Date()));
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [showAddEntry, setShowAddEntry] = useState(false);
+  const [entryForm, setEntryForm] = useState({ entry_type: "debit_note", side: "debit", amount: "", entry_date: isoDate(new Date()), reference: "", description: "", notes: "" });
+  const [showEmail, setShowEmail] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailMsg, setEmailMsg] = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+
+  useEffect(() => {
+    api.branches?.getAll?.().then((list) => setBranches(Array.isArray(list) ? list : [])).catch(() => setBranches([]));
+  }, []);
+
+  const activeSuppliers = useMemo(
+    () => suppliers.filter((s) => !s.deleted_at).sort((a, b) => String(a.name).localeCompare(String(b.name))),
+    [suppliers]
+  );
+  const supplier = data?.supplier || activeSuppliers.find((s) => s.id === Number(supplierId)) || null;
+
+  const range = datePreset === "custom"
+    ? [customStart || null, customEnd || null]
+    : datePreset === "all"
+      ? [null, null]
+      : computeStatementRange(datePreset);
+
+  const load = async () => {
+    if (!supplierId) { setData(null); return; }
+    setLoading(true);
+    try {
+      const result = await api.suppliers.getStatement({
+        id: Number(supplierId),
+        branch_id: branchId || null,
+        start_date: range[0],
+        end_date: range[1],
+      });
+      setData(result);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { load(); }, [supplierId, branchId, datePreset, customStart, customEnd]);
+
+  // ERP real-time: purchases, payments, returns, and ledger adjustments must
+  // land on this statement the instant they happen — like a live bank feed.
+  useRealtimeRefresh(["suppliers", "purchases"], load, { debounceMs: 800 });
+
+  const branchName = branches.find((b) => String(b.id) === String(branchId))?.name || "All branches";
+  const filterExtra = { branchName };
+  const rows = data ? buildStatementRows(data) : [];
+  const summary = data?.summary || {};
+
+  const doPrint = () => { try { printSupplierStatement(supplier, data, money, filterExtra); } catch (err) { showToast(err?.message || "Could not open print window"); } };
+  const doExportPdf = async () => {
+    setBusy("pdf");
+    try { await exportSupplierStatementPdf(supplier, data, money); } catch { showToast("PDF export failed"); } finally { setBusy(""); }
+  };
+  const doExportExcel = async () => {
+    setBusy("excel");
+    try { await exportSupplierStatementExcel(supplier, data, money); } catch { showToast("Excel export failed"); } finally { setBusy(""); }
+  };
+  const doDownloadPdf = doExportPdf;
+
+  const openEmail = () => { setEmailTo(supplier?.email || ""); setEmailMsg(""); setShowEmail(true); };
+  const sendEmail = async () => {
+    if (!emailTo || !/^\S+@\S+\.\S+$/.test(emailTo)) { showToast("Enter a valid recipient email"); return; }
+    setEmailSending(true);
+    try {
+      const { base64, filename } = await buildSupplierStatementPdfBase64(supplier, data, money);
+      const result = await api.suppliers.emailStatement({
+        supplier_id: supplier.id,
+        to: emailTo,
+        pdf_base64: base64,
+        filename,
+        message: emailMsg,
+      });
+      if (result?.success) {
+        showToast("Statement emailed");
+        setShowEmail(false);
+      } else {
+        showToast(result?.error || "Could not email statement");
+      }
+    } catch (err) {
+      showToast(err?.message || "Could not email statement");
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  const submitEntry = async () => {
+    const amount = parseFloat(entryForm.amount);
+    if (!amount || amount <= 0) { showToast("Enter a valid amount"); return; }
+    const result = await api.suppliers.addStatementEntry({
+      supplier_id: Number(supplierId),
+      branch_id: branchId || null,
+      entry_type: entryForm.entry_type,
+      side: entryForm.side,
+      amount,
+      entry_date: entryForm.entry_date,
+      reference: entryForm.reference,
+      description: entryForm.description,
+      notes: entryForm.notes,
+    });
+    if (result?.success) {
+      showToast("Ledger entry added");
+      setShowAddEntry(false);
+      setEntryForm({ entry_type: "debit_note", side: "debit", amount: "", entry_date: isoDate(new Date()), reference: "", description: "", notes: "" });
+      await load();
+    } else {
+      showToast(result?.error || "Could not add entry");
+    }
+  };
+
+  return (
+    <div>
+      <div className="card mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div>
+            <label className="text-xs font-medium text-app-muted mb-1 block">Supplier</label>
+            <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)} className="form-control w-full">
+              <option value="">Select supplier…</option>
+              {activeSuppliers.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}{s.code ? ` (${s.code})` : ""}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-app-muted mb-1 block">Branch</label>
+            <select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="form-control w-full">
+              <option value="">All branches</option>
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="lg:col-span-2">
+            <label className="text-xs font-medium text-app-muted mb-1 block">Period</label>
+            <div className="flex flex-wrap gap-1.5">
+              {STATEMENT_DATE_PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setDatePreset(p.id)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                    datePreset === p.id ? "bg-brand text-white border-brand" : "bg-white text-app-muted border-app hover:bg-app-panel-muted"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {datePreset === "custom" && (
+            <>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">From</label>
+                <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="form-control w-full" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">To</label>
+                <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="form-control w-full" />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {!supplierId ? (
+        <div className="card text-center py-14 text-sm text-app-muted">Select a supplier to view their account statement.</div>
+      ) : loading || !data ? (
+        <ListSkeleton rows={6} />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div>
+              <h3 className="font-semibold text-app-text">{supplier?.name}</h3>
+              <div className="text-xs text-app-muted mt-0.5">
+                {supplier?.code ? `${supplier.code} · ` : ""}{branchName} · {range[0] || range[1] ? `${range[0] || "…"} to ${range[1] || "…"}` : "All time"}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {can("suppliers", "edit") && (
+                <button type="button" className="btn btn-secondary text-xs py-1.5" onClick={() => setShowAddEntry(true)}>
+                  <Plus size={13} /> Add Entry
+                </button>
+              )}
+              {can("suppliers", "print") && (
+                <button type="button" className="btn btn-secondary text-xs py-1.5" onClick={doPrint}>
+                  <Printer size={13} /> Print Statement
+                </button>
+              )}
+              {can("suppliers", "export") && (
+                <button type="button" disabled={busy === "pdf"} className="btn btn-secondary text-xs py-1.5" onClick={doExportPdf}>
+                  <FileText size={13} /> Export PDF
+                </button>
+              )}
+              {can("suppliers", "export") && (
+                <button type="button" disabled={busy === "excel"} className="btn btn-secondary text-xs py-1.5" onClick={doExportExcel}>
+                  <FileSpreadsheet size={13} /> Export Excel
+                </button>
+              )}
+              {can("suppliers", "export") && (
+                <button type="button" className="btn btn-secondary text-xs py-1.5" onClick={openEmail}>
+                  <Mail size={13} /> Email Statement
+                </button>
+              )}
+              {can("suppliers", "print") && (
+                <button type="button" disabled={busy === "pdf"} className="btn btn-primary text-xs py-1.5" onClick={doDownloadPdf}>
+                  <Download size={13} /> Download PDF
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="table-container mb-5">
+            <table className="w-full min-w-[900px]">
+              <thead><tr className="bg-app-panel-muted">
+                {["Date", "Reference No", "Transaction", "Description", "Debit", "Credit", "Running Balance"].map((h) => (
+                  <th key={h} className="px-3 py-2.5 text-xs uppercase tracking-wide text-app-muted text-left">{h}</th>
+                ))}
+                {can("suppliers", "edit") && <th className="px-3 py-2.5" />}
+              </tr></thead>
+              <tbody>
+                {rows.map((e, i) => (
+                  <tr key={`${e.source_id || i}-${e.entry_type}`} className={`border-t border-app ${e.isOpening ? "bg-app-panel-muted font-medium" : ""}`}>
+                    <td className="px-3 py-3 text-xs text-app-muted">{fmtDate(e.entry_date)}</td>
+                    <td className="px-3 py-3 font-mono text-xs">{e.reference || "—"}</td>
+                    <td className="px-3 py-3 text-xs">{entryTypeLabel(e.entry_type)}</td>
+                    <td className="px-3 py-3 text-sm">{e.description || "—"}</td>
+                    <td className="px-3 py-3 font-mono text-sm">{Number(e.debit) ? money(e.debit) : ""}</td>
+                    <td className="px-3 py-3 font-mono text-sm text-success">{Number(e.credit) ? money(e.credit) : ""}</td>
+                    <td className="px-3 py-3 font-mono text-sm font-semibold">{money(e.running_balance)}</td>
+                    {can("suppliers", "edit") && (
+                      <td className="px-3 py-3">
+                        {e.source_table === "supplier_ledger_adjustments" && (
+                          <button
+                            type="button"
+                            className="text-app-muted hover:text-danger"
+                            title="Delete entry"
+                            onClick={async () => {
+                              if (!confirm("Delete this ledger entry?")) return;
+                              const result = await api.suppliers.deleteStatementEntry(e.source_id);
+                              if (result?.success) { showToast("Entry deleted"); await load(); }
+                              else showToast(result?.error || "Could not delete entry");
+                            }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+                {rows.length <= 1 && (
+                  <tr><td colSpan={8} className="text-center py-10 text-sm text-app-muted">No transactions for this period.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="card">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-app-muted mb-3">Statement Summary</h4>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                ["Opening Balance", summary.opening_balance],
+                ["Total Purchases", summary.total_purchases],
+                ["Total Payments", summary.total_payments],
+                ["Total Returns", summary.total_returns],
+                ["Total Debit Notes", summary.total_debit_notes],
+                ["Total Credit Notes", summary.total_credit_notes],
+                ["Closing Balance", summary.closing_balance],
+                ["Outstanding Balance", summary.outstanding_balance],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-xl bg-app-panel-muted p-3">
+                  <div className="text-[10px] uppercase tracking-wide text-app-muted">{label}</div>
+                  <div className="font-bold font-mono text-sm mt-1" style={{ color: label.includes("Outstanding") || label.includes("Closing") ? "#2563EB" : "#1B2439" }}>
+                    {money(value)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {showAddEntry && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowAddEntry(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-app-text">Add Ledger Entry</h3>
+              <button type="button" onClick={() => setShowAddEntry(false)} className="text-app-muted"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Type</label>
+                <select
+                  value={entryForm.entry_type}
+                  onChange={(e) => setEntryForm((f) => ({ ...f, entry_type: e.target.value, side: e.target.value === "credit_note" ? "credit" : "debit" }))}
+                  className="form-control w-full"
+                >
+                  {ENTRY_TYPE_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </select>
+              </div>
+              {entryForm.entry_type === "adjustment" && (
+                <div>
+                  <label className="text-xs font-medium text-app-muted mb-1 block">Direction</label>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setEntryForm((f) => ({ ...f, side: "debit" }))} className={`flex-1 py-2 rounded-lg text-xs font-medium border ${entryForm.side === "debit" ? "bg-brand text-white border-brand" : "border-app text-app-muted"}`}>Debit (increase)</button>
+                    <button type="button" onClick={() => setEntryForm((f) => ({ ...f, side: "credit" }))} className={`flex-1 py-2 rounded-lg text-xs font-medium border ${entryForm.side === "credit" ? "bg-brand text-white border-brand" : "border-app text-app-muted"}`}>Credit (decrease)</button>
+                  </div>
+                </div>
+              )}
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Date</label>
+                <input type="date" value={entryForm.entry_date} onChange={(e) => setEntryForm((f) => ({ ...f, entry_date: e.target.value }))} className="form-control w-full" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Amount</label>
+                <input type="number" min="0" step="0.01" value={entryForm.amount} onChange={(e) => setEntryForm((f) => ({ ...f, amount: e.target.value }))} className="form-control w-full" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Reference</label>
+                <input value={entryForm.reference} onChange={(e) => setEntryForm((f) => ({ ...f, reference: e.target.value }))} className="form-control w-full" placeholder="e.g. DN-0001" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Description</label>
+                <input value={entryForm.description} onChange={(e) => setEntryForm((f) => ({ ...f, description: e.target.value }))} className="form-control w-full" />
+              </div>
+              <button type="button" onClick={submitEntry} className="btn btn-primary w-full"><Save size={14} /> Save Entry</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEmail && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowEmail(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-app-text">Email Statement</h3>
+              <button type="button" onClick={() => setShowEmail(false)} className="text-app-muted"><X size={18} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Recipient email</label>
+                <input type="email" value={emailTo} onChange={(e) => setEmailTo(e.target.value)} className="form-control w-full" placeholder="supplier@example.com" />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-app-muted mb-1 block">Message (optional)</label>
+                <textarea value={emailMsg} onChange={(e) => setEmailMsg(e.target.value)} className="form-control w-full" rows={3} />
+              </div>
+              <button type="button" disabled={emailSending} onClick={sendEmail} className="btn btn-primary w-full">
+                <Mail size={14} /> {emailSending ? "Sending…" : "Send Statement"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Suppliers() {
@@ -303,6 +738,10 @@ export default function Suppliers() {
     }
   };
   useEffect(() => { load(); }, [showDeleted]);
+
+  // ERP real-time: supplier balances/dashboards move with every purchase,
+  // payment, return, or ledger adjustment across the company.
+  useRealtimeRefresh(["suppliers", "purchases"], load, { debounceMs: 1000 });
 
   const filtered = useMemo(() => {
     const sort = SORT_OPTIONS.find((s) => s.id === sortId) || SORT_OPTIONS[0];
@@ -367,7 +806,12 @@ export default function Suppliers() {
       tax_number: s.tax_number || "",
       payment_terms: s.payment_terms || "",
       credit_limit: s.credit_limit != null ? String(s.credit_limit) : "",
-      opening_balance: s.opening_balance != null ? String(s.opening_balance) : "",
+      opening_debit: s.opening_debit != null
+        ? String(s.opening_debit)
+        : s.opening_balance != null
+          ? String(s.opening_balance)
+          : "",
+      opening_credit: s.opening_credit != null ? String(s.opening_credit) : "",
       notes: s.notes || "",
       status: supplierStatus(s) === "Archived" ? "Archived" : s.status || "Active",
     });
@@ -391,7 +835,9 @@ export default function Suppliers() {
       tax_number: form.tax_number.trim(),
       payment_terms: form.payment_terms.trim(),
       credit_limit: parseFloat(form.credit_limit) || 0,
-      opening_balance: parseFloat(form.opening_balance) || 0,
+      opening_debit: parseFloat(form.opening_debit) || 0,
+      opening_credit: parseFloat(form.opening_credit) || 0,
+      opening_balance: (parseFloat(form.opening_debit) || 0) - (parseFloat(form.opening_credit) || 0),
       notes: form.notes.trim(),
       status: form.status || "Active",
     };
@@ -638,7 +1084,9 @@ export default function Suppliers() {
               </button>
             ))}
           </div>
-          {!reports ? (
+          {reportTab === "statement" ? (
+            <SupplierStatementReport suppliers={suppliers} />
+          ) : !reports ? (
             <ListSkeleton rows={5} />
           ) : (
             <div className="table-container">
@@ -985,10 +1433,15 @@ export default function Suppliers() {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-medium text-app-text mb-1 block">Opening balance ({currency.symbol})</label>
-                  <input type="number" min="0" step="0.01" value={form.opening_balance} onChange={(e) => setForm({ ...form, opening_balance: e.target.value })} className="form-control w-full" disabled={!!editingId} />
-                  {editingId ? <p className="text-[10px] text-app-muted mt-1">Opening balance is set at create time.</p> : null}
+                  <label className="text-xs font-medium text-app-text mb-1 block">Opening Debit ({currency.symbol})</label>
+                  <input type="number" min="0" step="0.01" value={form.opening_debit} onChange={(e) => setForm({ ...form, opening_debit: e.target.value })} className="form-control w-full" disabled={!!editingId} />
                 </div>
+                <div>
+                  <label className="text-xs font-medium text-app-text mb-1 block">Opening Credit ({currency.symbol})</label>
+                  <input type="number" min="0" step="0.01" value={form.opening_credit} onChange={(e) => setForm({ ...form, opening_credit: e.target.value })} className="form-control w-full" disabled={!!editingId} />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium text-app-text mb-1 block">Status</label>
                   <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} className="form-control w-full">
@@ -997,13 +1450,22 @@ export default function Suppliers() {
                     <option value="Archived">Archived</option>
                   </select>
                 </div>
+                <div className="flex flex-col justify-end">
+                  <p className="text-[10px] text-app-muted">
+                    Net opening: {currency.symbol}
+                    {((parseFloat(form.opening_debit) || 0) - (parseFloat(form.opening_credit) || 0)).toFixed(2)}
+                    {editingId ? " (set at create)" : ""}
+                  </p>
+                </div>
               </div>
               <div>
                 <label className="text-xs font-medium text-app-text mb-1 block">Notes</label>
                 <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="form-control w-full" placeholder="Internal notes" />
               </div>
               {!editingId && (
-                <p className="text-xs text-app-muted">Supplier code will be auto-generated (SUP-#####). Opening balance seeds AP.</p>
+                <p className="text-xs text-app-muted">
+                  Supplier code will be auto-generated (SUP-#####). Outstanding = Opening Debit − Opening Credit + Purchases − Payments − Credit Notes.
+                </p>
               )}
               <button type="submit" className="btn btn-primary w-full">
                 <Save size={15} /> {editingId ? "Save Changes" : "Save Supplier"}
@@ -1053,7 +1515,13 @@ export default function Suppliers() {
               {detailFor.address && <div className="flex items-start gap-2"><MapPin size={12} className="mt-0.5" /> {detailFor.address}</div>}
               {detailFor.tax_number && <div className="flex items-center gap-2"><Hash size={12} /> Tax PIN {detailFor.tax_number}</div>}
               {detailFor.payment_terms && <div className="flex items-center gap-2"><Calendar size={12} /> Terms: {detailFor.payment_terms}</div>}
-              {Number(detailFor.opening_balance) > 0 && <div className="flex items-center gap-2"><Wallet size={12} /> Opening {money(detailFor.opening_balance)}</div>}
+              {(Number(detailFor.opening_debit) > 0 || Number(detailFor.opening_credit) > 0 || Number(detailFor.opening_balance) > 0) && (
+                <div className="flex items-center gap-2">
+                  <Wallet size={12} />
+                  Opening Debit {money(detailFor.opening_debit ?? detailFor.opening_balance)}
+                  {Number(detailFor.opening_credit) > 0 ? ` · Credit ${money(detailFor.opening_credit)}` : ""}
+                </div>
+              )}
               {Number(detailFor.credit_limit) > 0 && <div className="flex items-center gap-2"><CreditCard size={12} /> Credit limit {money(detailFor.credit_limit)}</div>}
               {detailFor.notes && <div className="pt-1 text-app-text">{detailFor.notes}</div>}
               <div className="flex flex-wrap gap-2 pt-2">
@@ -1069,16 +1537,18 @@ export default function Suppliers() {
 
             <div className="grid grid-cols-2 gap-3 px-5 py-4">
               <div className="rounded-xl bg-app-panel-muted p-3">
-                <div className="text-[10px] uppercase tracking-wide text-app-muted">Outstanding</div>
-                <div className="font-bold font-mono text-sm mt-1" style={{ color: Number(detailFor.balance) > 0 ? "#DC2626" : "#1B2439" }}>{money(detailFor.balance)}</div>
+                <div className="text-[10px] uppercase tracking-wide text-app-muted">Current / Outstanding</div>
+                <div className="font-bold font-mono text-sm mt-1" style={{ color: Number(detailFor.outstanding_balance ?? detailFor.balance) > 0 ? "#DC2626" : "#1B2439" }}>
+                  {money(detailFor.outstanding_balance ?? detailFor.balance)}
+                </div>
               </div>
               <div className="rounded-xl bg-app-panel-muted p-3">
                 <div className="text-[10px] uppercase tracking-wide text-app-muted">Total purchases</div>
-                <div className="font-bold font-mono text-sm text-brand mt-1">{money(detailFor.total_ordered)}</div>
+                <div className="font-bold font-mono text-sm text-brand mt-1">{money(detailFor.total_purchases ?? detailFor.total_ordered)}</div>
               </div>
               <div className="rounded-xl bg-app-panel-muted p-3">
-                <div className="text-[10px] uppercase tracking-wide text-app-muted">Total paid</div>
-                <div className="font-bold font-mono text-sm mt-1">{money(detailFor.total_paid)}</div>
+                <div className="text-[10px] uppercase tracking-wide text-app-muted">Total payments</div>
+                <div className="font-bold font-mono text-sm mt-1">{money(detailFor.total_payments ?? detailFor.total_paid)}</div>
               </div>
               <div className="rounded-xl bg-app-panel-muted p-3">
                 <div className="text-[10px] uppercase tracking-wide text-app-muted">Last payment</div>

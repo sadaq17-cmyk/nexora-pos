@@ -20,7 +20,7 @@
 | Vite build | **PASS** (`exit 0`, ~1m 22s) |
 | Deploy | **PASS** (retry after network `fetch failed`) |
 | Post-deploy validate | **PASS** (`routes_ok`, `health_ok`, `bundle_safe`) |
-| Production | https://www.httpsnexorapos.com |
+| Production | https://www.nexorapospro.com |
 
 Honest scope note: Payroll is **advertised** on Professional+ plans but **no Payroll module** exists in the codebase — scored **DEFERRED**, not a silent PASS. Customer-payment FX UI and POS multi-currency tender remain **DEFERRED** per `MULTI_CURRENCY_REPORT.md`.
 
@@ -221,7 +221,7 @@ None of the above are treated as deploy blockers for the current enterprise POS 
 | `npx vercel --prod --yes` (retry) | **READY** |
 | Deploy ID | `dpl_6keoUujAbpk351LiNNXTvFCVvo84` |
 | Deployment URL | https://nexora-asq0qmelp-nexoraposapp.vercel.app |
-| Production alias | https://www.httpsnexorapos.com |
+| Production alias | https://www.nexorapospro.com |
 | Inspect | https://vercel.com/nexoraposapp/nexora-pos/6keoUujAbpk351LiNNXTvFCVvo84 |
 | `post-deploy-validate.mjs` | `routes_ok=true` · `chunks_ok=true` · `bundle_safe=true` · `health_ok=true failed=none` |
 

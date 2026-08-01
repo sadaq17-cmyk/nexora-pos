@@ -23,7 +23,7 @@ export default function ReceiptDocument({
   return (
     <div className={print ? "" : "p-6"} style={print ? undefined : { fontFamily: "var(--font-mono)" }}>
       <div className="mb-4 text-center">
-        <div className="font-bold">{settings.store_name || "Nexora POS Enterprise"}</div>
+        <div className="font-bold">{settings.store_name || "Store"}</div>
         <div className="text-xs text-app-muted">{settings.store_address}</div>
         {settings.store_phone && <div className="text-xs text-app-muted">{settings.store_phone}</div>}
       </div>

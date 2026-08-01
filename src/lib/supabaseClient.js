@@ -1,7 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const viteEnv = (typeof import.meta !== "undefined" && import.meta.env) || {};
+const SUPABASE_URL = viteEnv.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = viteEnv.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "";
 
 let client = null;
 let sessionClient = null;
@@ -22,8 +23,7 @@ function buildClient(storage) {
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   configError =
     "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY as environment variables (see SUPABASE_SETUP.md).";
-  // eslint-disable-next-line no-console
-  console.error(`[supabaseClient] ${configError}`);
+  if (import.meta.env.DEV) console.error(`[supabaseClient] ${configError}`);
 } else {
   try {
     const persistentStorage = typeof window !== "undefined" ? window.localStorage : undefined;
@@ -36,8 +36,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     configError =
       err?.message
       || "Supabase client failed to initialize. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.";
-    // eslint-disable-next-line no-console
-    console.error(`[supabaseClient] ${configError}`);
+    if (import.meta.env.DEV) console.error(`[supabaseClient] ${configError}`);
   }
 }
 

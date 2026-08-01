@@ -20,7 +20,7 @@ export async function getMfaAssurance(client) {
   };
 }
 
-export async function enrollTotp(client, friendlyName = "Nexora POS Authenticator") {
+export async function enrollTotp(client, friendlyName = "Nexora POS Pro Authenticator") {
   const { data, error } = await client.auth.mfa.enroll({
     factorType: "totp",
     friendlyName,

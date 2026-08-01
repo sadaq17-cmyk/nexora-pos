@@ -3,8 +3,10 @@
  * Usage: node scripts/e2e-clean-login.mjs
  */
 import { chromium } from "playwright";
+import { assertNotProduction } from "./_prodSafety.mjs";
 
-const BASE = process.env.E2E_BASE_URL || "https://www.httpsnexorapos.com";
+const BASE = process.env.E2E_BASE_URL || "https://www.nexorapospro.com";
+assertNotProduction(BASE, { scriptName: "e2e-clean-login.mjs" });
 const EMAIL = process.env.E2E_EMAIL || "qa.signup.0718b@gmail.com";
 const PASSWORD = process.env.E2E_PASSWORD || "QaSignup0718!";
 

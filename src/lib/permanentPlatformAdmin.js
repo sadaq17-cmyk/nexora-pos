@@ -1,10 +1,11 @@
 /**
  * Permanent Platform Super Admin (global SaaS admin — no company).
+ * Official support inbox = Super Owner login email.
  * Password provisioning is server-side only via ensure-permanent-owner.
  */
 export const PERMANENT_PLATFORM_ADMIN = Object.freeze({
   username: "SuperAdmin",
-  email: "saadaq17@icloud.com",
+  email: "support@httpsnexorapos.com",
   name: "Platform Super Admin",
   role: "platform_owner",
   company_id: null,

@@ -14,12 +14,42 @@ import {
 } from "./_authHelpers.js";
 
 /**
- * Best-effort impersonation: mint a magic-link token for the target user via
- * admin.generateLink. The client consumes the token with verifyOtp.
+ * Impersonation: mint a magic-link token for the target user via admin.generateLink.
+ * The client consumes the token with verifyOtp and can stop via restored owner session.
  *
- * Callers: platform_owner (any non-platform user) or owner (same-company users
- * they can manage). Nested impersonation is rejected client-side.
+ * Callers:
+ * - platform_owner: any non-platform tenant user (Login as Company Owner / staff)
+ * - owner: same-company staff only (never platform routes; never other tenants)
+ *
+ * Nested impersonation is rejected client-side. Platform Owner cannot be impersonated.
+ * Sensitive starts are written to audit_log.
  */
+
+async function writeImpersonationAudit(admin, { caller, target, companyId }) {
+  try {
+    const payload = {
+      user_id: caller?.id || null,
+      user_name: caller?.name || caller?.username || "Platform",
+      action: "impersonation_started",
+      module: "platform_admin",
+      details: JSON.stringify({
+        target_user_id: target.id,
+        target_email: target.email || null,
+        target_role: normalizeRole(target.app_metadata?.role),
+        actor_role: normalizeRole(caller.role),
+        company_id: companyId,
+      }),
+      company_id: companyId ?? null,
+    };
+    const { error } = await admin.from("audit_log").insert(payload);
+    if (error) {
+      delete payload.company_id;
+      await admin.from("audit_log").insert(payload);
+    }
+  } catch (err) {
+    console.error("[admin-impersonate] audit failed:", err);
+  }
+}
 
 export default async function handler(req, res) {
   applySecurityHeaders(res);
@@ -49,6 +79,7 @@ export default async function handler(req, res) {
     const target = data.user;
     const targetMeta = target.app_metadata || {};
     const targetRole = normalizeRole(targetMeta.role);
+    const targetCompanyId = targetMeta.company_id ?? null;
 
     if (targetMeta.active === false || targetMeta.active === 0) {
       return jsonError(res, 400, "Only active users can be impersonated.");
@@ -57,8 +88,12 @@ export default async function handler(req, res) {
       return jsonError(res, 403, "Platform Owner accounts cannot be impersonated.", "FORBIDDEN");
     }
     if (isOwner(caller.role) && !isPlatformOwner(caller.role)) {
-      if (!sameCompany(targetMeta.company_id, caller.company_id)) {
+      if (!sameCompany(targetCompanyId, caller.company_id)) {
         return jsonError(res, 403, "Cross-company account access is denied.", "FORBIDDEN");
+      }
+      // Company Owner may only enter staff sessions — never another owner peer by default.
+      if (targetRole === "owner") {
+        return jsonError(res, 403, "Company Owners cannot impersonate other Company Owners.", "FORBIDDEN");
       }
     }
 
@@ -84,6 +119,13 @@ export default async function handler(req, res) {
       return jsonError(res, 502, "Impersonation link did not include a usable token.");
     }
 
+    await writeImpersonationAudit(admin, {
+      caller,
+      target,
+      companyId: targetCompanyId != null ? Number(targetCompanyId) : null,
+    });
+
+    const startedAt = new Date().toISOString();
     return res.status(200).json({
       success: true,
       hashed_token: hashedToken,
@@ -93,7 +135,10 @@ export default async function handler(req, res) {
       impersonation: {
         owner: { id: caller.id, name: caller.name, email: caller.email, role: caller.role },
         target_id: target.id,
-        started_at: new Date().toISOString(),
+        started_at: startedAt,
+        // Client restores owner session via stopImpersonation; no hard TTL token,
+        // but UI banner always offers exit. Reload without restored tokens ends session.
+        exit_hint: "Use Stop Impersonation in the banner to return to your Platform or Company Owner session.",
       },
     });
   } catch (err) {

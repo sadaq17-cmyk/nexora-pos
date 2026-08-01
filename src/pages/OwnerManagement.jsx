@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, Building2, CircleDollarSign, CreditCard, Globe2,
   Settings2, ShieldCheck, Users,
@@ -7,6 +7,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import CompanyManagementPanel from "../components/CompanyManagementPanel";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { api } from "../lib/api";
 import { isPlatformOwner } from "../lib/rbac";
 import { formatLimit, isContactSalesPlan, planPriceLabel } from "../lib/saasPlans";
@@ -37,22 +38,57 @@ export default function OwnerManagement() {
   const [overview, setOverview] = useState({ companies: [], users: [], branches: [], stats: {}, audit: [] });
   const [consoleData, setConsoleData] = useState({ subscriptions: [], plans: [], domains: [], billing: [], audit: [], analytics: {}, platformSettings: {}, features: [], companyFeatureOverrides: [] });
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 400);
+  const [companyPage, setCompanyPage] = useState(1);
   const [companyStatus, setCompanyStatus] = useState("");
   const [showCreateCompany, setShowCreateCompany] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [pagination, setPagination] = useState({ page: 1, page_size: 25, total: 0, total_pages: 1 });
+  const overviewGen = useRef(0);
+  const consoleLoaded = useRef(false);
+
+  const loadOverview = useCallback(async (term, page = 1, opts = {}) => {
+    const gen = ++overviewGen.current;
+    setLoading(true);
+    const overviewResult = await api.owner.getOverview({
+      search: term,
+      page,
+      page_size: opts.page_size || 25,
+      light: opts.light === true,
+    });
+    if (gen !== overviewGen.current) return;
+    if (overviewResult.success) {
+      setOverview(overviewResult);
+      if (overviewResult.pagination) setPagination(overviewResult.pagination);
+    }
+    setLoading(false);
+  }, []);
+
+  const loadConsoleOnce = useCallback(async () => {
+    if (consoleLoaded.current) return;
+    consoleLoaded.current = true;
+    const consoleResult = await api.owner.getPlatformConsole();
+    if (consoleResult.success) setConsoleData(consoleResult);
+  }, []);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    const [overviewResult, consoleResult] = await Promise.all([
-      api.owner.getOverview({ search }),
-      api.owner.getPlatformConsole(),
-    ]);
-    if (overviewResult.success) setOverview(overviewResult);
-    if (consoleResult.success) setConsoleData(consoleResult);
-    setLoading(false);
-  }, [search]);
+    consoleLoaded.current = false;
+    await Promise.all([loadOverview(debouncedSearch, companyPage), loadConsoleOnce()]);
+  }, [debouncedSearch, companyPage, loadOverview, loadConsoleOnce]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setCompanyPage(1);
+  }, [debouncedSearch]);
+
+  useEffect(() => {
+    // Dashboard preview: light enrich (no per-company counts). Companies module: paginated list counts.
+    const light = module !== "companies";
+    loadOverview(debouncedSearch, light ? 1 : companyPage, {
+      light,
+      page_size: light ? 10 : 25,
+    });
+  }, [debouncedSearch, companyPage, loadOverview, module]);
+  useEffect(() => { loadConsoleOnce(); }, [loadConsoleOnce]);
 
   const companyMap = useMemo(
     () => Object.fromEntries(overview.companies.map((company) => [company.id, company])),
@@ -104,6 +140,9 @@ export default function OwnerManagement() {
           load={load}
           act={act}
           showToast={showToast}
+          pagination={pagination}
+          page={companyPage}
+          setPage={setCompanyPage}
         />
       )}
       {!loading && module === "subscriptions" && <Subscriptions rows={consoleData.subscriptions} plans={consoleData.plans} companyMap={companyMap} act={act} />}

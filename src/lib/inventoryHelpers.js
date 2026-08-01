@@ -1,4 +1,4 @@
-/** Inventory schema helpers for Nexora POS mock/localStorage API */
+/** Inventory schema helpers for Nexora POS Pro mock/localStorage API */
 
 export function seedBrands() {
   return [
@@ -30,12 +30,46 @@ export function seedWarehouses(branches = []) {
       ];
   return list.map((branch, index) => ({
     id: index + 1,
-    name: `${branch.name} Store`,
-    code: `${branch.code || `WH${index + 1}`}-MAIN`,
+    // Enterprise Warehouse Management: the first warehouse is the central
+    // Main Store — all approved purchases receive into it, and every other
+    // warehouse/store only ever gets stock via an explicit Stock Transfer.
+    name: index === 0 ? "Main Store" : `${branch.name} Store`,
+    code: index === 0 ? "MAIN" : `${branch.code || `WH${index + 1}`}-MAIN`,
     branch_id: branch.id,
     address: branch.address || "",
     active: true,
+    is_main: index === 0,
   }));
+}
+
+/**
+ * Resolves the Main Store warehouse id for the mock/local database, self-healing
+ * (promotes the oldest warehouse if none is flagged) and auto-provisioning a
+ * "Main Store" warehouse if none exist yet. Mirrors resolveMainWarehouseId()
+ * in api/_posData.js so mock/offline mode behaves identically to production.
+ */
+export function resolveMainWarehouseIdMock(dbData) {
+  const warehouses = Array.isArray(dbData.warehouses) ? dbData.warehouses : (dbData.warehouses = []);
+  let main = warehouses.find((w) => w.is_main);
+  if (main) return main.id;
+
+  if (warehouses.length) {
+    const oldest = warehouses.reduce((a, b) => (Number(b.id) < Number(a.id) ? b : a));
+    oldest.is_main = true;
+    return oldest.id;
+  }
+
+  const created = {
+    id: Math.max(0, ...warehouses.map((w) => Number(w.id) || 0)) + 1,
+    name: "Main Store",
+    code: "MAIN",
+    branch_id: null,
+    address: "",
+    active: true,
+    is_main: true,
+  };
+  warehouses.push(created);
+  return created.id;
 }
 
 const UNIT_NAME_TO_ID = {

@@ -134,56 +134,155 @@ async function countByCompany(admin, table, companyId, extra = null) {
 
 async function sumSalesTotal(admin, companyId) {
   try {
+    // Prefer PostgREST aggregate — avoid pulling thousands of sale rows into the function.
     const { data, error } = await admin
+      .from("sales")
+      .select("total.sum()")
+      .eq("company_id", companyId)
+      .maybeSingle();
+    if (!error && data) {
+      const sum = data.sum ?? data.total ?? Object.values(data)[0];
+      if (sum != null && Number.isFinite(Number(sum))) return Number(sum);
+    }
+    // Fallback: capped scan (legacy PostgREST / older schemas).
+    const { data: rows, error: scanErr } = await admin
       .from("sales")
       .select("total")
       .eq("company_id", companyId)
-      .limit(5000);
-    if (error || !Array.isArray(data)) return 0;
-    return data.reduce((sum, row) => sum + Number(row.total || 0), 0);
+      .limit(2000);
+    if (scanErr || !Array.isArray(rows)) return 0;
+    return rows.reduce((acc, row) => acc + Number(row.total || 0), 0);
   } catch {
     return 0;
   }
 }
 
-async function listAuthOwners(admin) {
-  const owners = [];
-  let page = 1;
-  const perPage = 200;
-  while (page <= 10) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage });
-    if (error || !data?.users?.length) break;
-    for (const user of data.users) {
-      const role = normalizeRole(user.app_metadata?.role);
-      if (role === "platform_owner") continue;
-      owners.push({
-        id: user.id,
-        name: user.user_metadata?.name || user.email || "User",
-        username: user.user_metadata?.username || user.app_metadata?.username || "",
-        email: user.email || "",
-        phone: user.phone || user.user_metadata?.phone || "",
-        role,
-        company_id: user.app_metadata?.company_id ?? null,
-        branch_id: user.app_metadata?.branch_id ?? null,
-        active: user.app_metadata?.active === false || user.app_metadata?.active === 0 ? 0 : 1,
-        account_status: user.app_metadata?.account_status || "active",
-        last_login_at: user.last_sign_in_at || null,
-        email_verified: !!user.email_confirmed_at,
-      });
-    }
-    if (data.users.length < perPage) break;
-    page += 1;
-  }
-  return owners;
+function mapProfileUser(row) {
+  return {
+    id: row.id,
+    name: row.name || row.email || "User",
+    username: row.username || "",
+    email: row.email || "",
+    phone: row.phone || "",
+    role: normalizeRole(row.role),
+    company_id: row.company_id ?? null,
+    branch_id: row.branch_id ?? null,
+    active: row.active === false || row.active === 0 ? 0 : 1,
+    account_status: row.account_status || "active",
+    last_login_at: row.last_login_at || null,
+    email_verified: true,
+  };
 }
 
-async function enrichCompany(admin, company, subscription, users, settings) {
+/** Owners for a company set — profiles only (no Auth directory scan). */
+async function listOwnersForCompanies(admin, companies) {
+  const list = Array.isArray(companies) ? companies : [];
+  const ownerIds = [...new Set(list.map((c) => c.owner_user_id).filter(Boolean).map(String))];
+  const byId = new Map();
+
+  if (ownerIds.length) {
+    const { data, error } = await admin
+      .from("profiles")
+      .select("id, name, username, email, phone, role, company_id, branch_id, active, account_status, last_login_at")
+      .in("id", ownerIds.slice(0, 1000));
+    if (!error) {
+      for (const row of data || []) byId.set(String(row.id), mapProfileUser(row));
+    }
+  }
+
+  const missingCompanyIds = list
+    .filter((c) => {
+      if (!c.owner_user_id) return true;
+      return !byId.has(String(c.owner_user_id));
+    })
+    .map((c) => Number(c.id))
+    .filter((id) => Number.isFinite(id));
+
+  if (missingCompanyIds.length) {
+    const { data, error } = await admin
+      .from("profiles")
+      .select("id, name, username, email, phone, role, company_id, branch_id, active, account_status, last_login_at")
+      .eq("role", "owner")
+      .in("company_id", missingCompanyIds.slice(0, 500));
+    if (!error) {
+      for (const row of data || []) {
+        const key = String(row.id);
+        if (!byId.has(key)) byId.set(key, mapProfileUser(row));
+      }
+    }
+  }
+
+  return [...byId.values()];
+}
+
+async function enrichCompany(admin, company, subscription, users, settings, options = {}) {
   const companyId = Number(company.id);
+  const light = options.light === true;
   const owner =
     users.find((u) => String(u.id) === String(company.owner_user_id))
     || users.find((u) => Number(u.company_id) === companyId && normalizeRole(u.role) === "owner")
     || null;
   const plan = getPlanByCode(subscription?.plan_code || company.plan_code || "free_trial");
+  const display_status = deriveCompanyDisplayStatus(company, subscription, settings);
+
+  // Light / list mode: status + owner (+ optional branch/user counts). No sales scans.
+  if (light || options.list === true) {
+    let branch_count = Number(options.branchCount) || 0;
+    let user_count = Number(options.userCount) || 0;
+    if (options.list === true && options.branchCount == null) {
+      const [bc, uc] = await Promise.all([
+        countByCompany(admin, "branches", companyId),
+        countByCompany(admin, "profiles", companyId),
+      ]);
+      branch_count = bc;
+      user_count = uc;
+    }
+    const trialDays = trialDaysRemaining(company, subscription);
+    const subStatus = String(subscription?.status || "").toLowerCase();
+    const planCode = normalizePlanCode(subscription?.plan_code || company.plan_code);
+    let free_trial_status = "Not on trial";
+    if (planCode === "free_trial" || subStatus === "trialing") {
+      free_trial_status = trialDays > 0 ? "Active trial" : "Trial ended";
+    }
+    return {
+      ...company,
+      owner_name: owner?.name || null,
+      owner_email: owner?.email || company.email || null,
+      owner_phone: owner?.phone || company.phone || null,
+      owner_user_id: company.owner_user_id || owner?.id || null,
+      last_login_at: owner?.last_login_at || null,
+      registration_date: company.created_at || null,
+      subscription_plan: plan?.name || subscription?.plan_code || company.plan_code || "Unassigned",
+      plan_code: planCode,
+      subscription_status: subscription?.status || null,
+      free_trial_status,
+      trial_days: trialDays,
+      trial_ends_at: subscription?.trial_ends_at || company.trial_ends_at || null,
+      paid_until: subscription?.expires_at || null,
+      expiry_date: subscription?.expires_at || company.trial_ends_at || null,
+      expires_at: subscription?.expires_at || null,
+      branch_count,
+      user_count,
+      active_user_count: user_count,
+      products: 0,
+      product_count: 0,
+      sales: 0,
+      sales_count: 0,
+      sales_total: 0,
+      storage_usage: 0,
+      storage_usage_label: "Not metered",
+      ai_usage: 0,
+      ai_usage_label: "Not metered",
+      sms_usage: 0,
+      sms_usage_label: "Not metered",
+      display_status,
+      company_status: display_status,
+      status: display_status === "disabled" ? "cancelled" : (display_status === "expired" ? company.status : (display_status === "suspended" ? "suspended" : company.status)),
+      platform_locked: settings.platform_locked === true,
+      limits: subscription?.limits || plan?.limits || {},
+    };
+  }
+
   const [
     branch_count,
     product_count,
@@ -195,10 +294,8 @@ async function enrichCompany(admin, company, subscription, users, settings) {
     countByCompany(admin, "sales", companyId),
     countByCompany(admin, "profiles", companyId),
   ]);
-  const auth_user_count = users.filter((u) => Number(u.company_id) === companyId).length;
-  const user_count = Math.max(profile_user_count, auth_user_count);
+  const user_count = profile_user_count;
   const sales_total = await sumSalesTotal(admin, companyId);
-  const display_status = deriveCompanyDisplayStatus(company, subscription, settings);
 
   const trialDays = trialDaysRemaining(company, subscription);
   const subStatus = String(subscription?.status || "").toLowerCase();
@@ -227,7 +324,7 @@ async function enrichCompany(admin, company, subscription, users, settings) {
     expires_at: subscription?.expires_at || null,
     branch_count,
     user_count,
-    active_user_count: users.filter((u) => Number(u.company_id) === companyId && u.active).length,
+    active_user_count: user_count,
     products: product_count,
     product_count,
     sales: sales_count,
@@ -251,48 +348,94 @@ async function getOverview(admin, caller, params = {}) {
   const denied = requirePlatform(caller);
   if (denied) return denied;
 
-  const { data: companies, error } = await admin.from("companies").select("*").order("id", { ascending: true });
+  const COMPANY_COLS =
+    "id, name, code, email, phone, country, currency, status, plan_code, trial_ends_at, owner_user_id, created_at, address";
+
+  const { data: companies, error } = await admin
+    .from("companies")
+    .select(COMPANY_COLS)
+    .order("id", { ascending: true });
   if (error && isMissingTableError(error)) {
-    return { success: true, companies: [], users: [], branches: [], audit: [], stats: { companies: 0, active_companies: 0, users: 0, active_users: 0 } };
+    return {
+      success: true,
+      companies: [],
+      users: [],
+      branches: [],
+      audit: [],
+      pagination: { page: 1, page_size: 25, total: 0, total_pages: 1 },
+      stats: { companies: 0, active_companies: 0, users: 0, active_users: 0 },
+    };
   }
   if (error) throw error;
 
-  const [{ data: subscriptions }, { data: branches }, users, { data: audit }] = await Promise.all([
-    admin.from("company_subscriptions").select("*"),
-    admin.from("branches").select("id, company_id, name, code, address, active"),
-    listAuthOwners(admin),
-    admin.from("audit_log").select("*").order("created_at", { ascending: false }).limit(300),
-  ]);
+  const { data: subscriptions } = await admin.from("company_subscriptions").select("*");
+  let settingsRows = [];
+  try {
+    const settingsRes = await admin.from("company_settings").select("company_id, settings");
+    settingsRows = settingsRes.data || [];
+  } catch {
+    settingsRows = [];
+  }
 
   const subByCompany = new Map((subscriptions || []).map((row) => [Number(row.company_id), row]));
   const settingsByCompany = new Map();
-  for (const company of companies || []) {
-    settingsByCompany.set(Number(company.id), await loadSettings(admin, company.id));
+  for (const row of settingsRows) {
+    settingsByCompany.set(
+      Number(row.company_id),
+      row.settings && typeof row.settings === "object" ? row.settings : {}
+    );
   }
+
+  // Owners only for this company set — never scan Auth.users.
+  const users = await listOwnersForCompanies(admin, companies || []);
 
   const query = String(params.search || "").trim().toLowerCase();
   const companyFilter = params.company_id == null || params.company_id === "" ? null : Number(params.company_id);
+  const light = params.light === true;
+  const page = Math.max(1, Number(params.page) || 1);
+  const pageSize = Math.min(100, Math.max(5, Number(params.page_size) || (light ? 500 : 25)));
 
-  let enriched = [];
-  for (const company of companies || []) {
-    if (companyFilter != null && Number(company.id) !== companyFilter) continue;
-    const row = await enrichCompany(
-      admin,
-      company,
-      subByCompany.get(Number(company.id)),
-      users,
-      settingsByCompany.get(Number(company.id)) || {}
-    );
-    if (query) {
-      const hay = [row.name, row.code, row.email, row.owner_name, row.owner_email, row.country]
+  let targets = (companies || []).filter(
+    (company) => companyFilter == null || Number(company.id) === companyFilter
+  );
+  if (query) {
+    targets = targets.filter((company) => {
+      const ownerHint = users.find((u) => String(u.id) === String(company.owner_user_id))
+        || users.find((u) => Number(u.company_id) === Number(company.id) && normalizeRole(u.role) === "owner");
+      const hay = [company.name, company.code, company.email, company.country, ownerHint?.name, ownerHint?.email]
         .map((v) => String(v || "").toLowerCase())
         .join(" ");
-      if (!hay.includes(query)) continue;
-    }
-    enriched.push(row);
+      return hay.includes(query);
+    });
   }
 
+  const totalCompanies = targets.length;
+  const pageSlice = light
+    ? targets.slice(0, Math.min(targets.length, pageSize))
+    : targets.slice((page - 1) * pageSize, page * pageSize);
+
+  // Company Management: list enrich (branch + user head-counts only) for the page slice.
+  const enrichOpts = light ? { light: true } : { list: true };
+
+  const enriched = await Promise.all(
+    pageSlice.map((company) =>
+      enrichCompany(
+        admin,
+        company,
+        subByCompany.get(Number(company.id)),
+        users,
+        settingsByCompany.get(Number(company.id)) || {},
+        enrichOpts
+      )
+    )
+  );
+
+  const pageCompanyIds = new Set(pageSlice.map((c) => Number(c.id)));
   const filteredUsers = users.filter((user) => {
+    if (pageCompanyIds.size && !pageCompanyIds.has(Number(user.company_id))
+      && !pageSlice.some((c) => String(c.owner_user_id) === String(user.id))) {
+      return false;
+    }
     if (companyFilter != null && Number(user.company_id) !== companyFilter) return false;
     if (params.role && normalizeRole(user.role) !== normalizeRole(params.role)) return false;
     if (params.status === "active" && !user.active) return false;
@@ -304,23 +447,39 @@ async function getOverview(admin, caller, params = {}) {
     return true;
   });
 
-  const activeCompanies = enriched.filter((c) => c.display_status === "active").length;
+  let activeCompanies = 0;
+  for (const company of targets) {
+    const ds = deriveCompanyDisplayStatus(
+      company,
+      subByCompany.get(Number(company.id)),
+      settingsByCompany.get(Number(company.id)) || {}
+    );
+    if (ds === "active") activeCompanies += 1;
+  }
+
+  const [{ count: totalUsers }, { count: activeUsers }] = await Promise.all([
+    admin.from("profiles").select("id", { count: "exact", head: true }).neq("role", "platform_owner"),
+    admin.from("profiles").select("id", { count: "exact", head: true }).neq("role", "platform_owner").neq("active", 0),
+  ]);
 
   return {
     success: true,
     companies: enriched,
     users: filteredUsers,
     roles: [],
-    branches: branches || [],
-    audit: (audit || []).filter((entry) =>
-      ["owner_management", "platform_admin", "users", "subscriptions", "companies"].includes(String(entry.module || ""))
-      || /impersonat|suspend|password|company_/i.test(String(entry.action || ""))
-    ).slice(0, 300),
+    branches: [],
+    pagination: {
+      page: light ? 1 : page,
+      page_size: light ? enriched.length : pageSize,
+      total: totalCompanies,
+      total_pages: light ? 1 : Math.max(1, Math.ceil(totalCompanies / pageSize)),
+    },
+    audit: [],
     stats: {
-      companies: enriched.length,
+      companies: totalCompanies,
       active_companies: activeCompanies,
-      users: filteredUsers.length,
-      active_users: filteredUsers.filter((u) => u.active).length,
+      users: Number(totalUsers || 0),
+      active_users: Number(activeUsers || 0),
     },
   };
 }
@@ -329,19 +488,71 @@ async function getPlatformConsole(admin, caller) {
   const denied = requirePlatform(caller);
   if (denied) return denied;
 
-  const overview = await getOverview(admin, caller, {});
-  if (!overview.success) return overview;
+  // Independent of getOverview — no duplicate company enrich / Auth scans.
+  const [
+    companiesRes,
+    subscriptionsRes,
+    profileCountRes,
+    activeProfileRes,
+    branchCountRes,
+    auditRes,
+    settingsRes,
+  ] = await Promise.all([
+    admin.from("companies").select("id, name, code, status, plan_code, trial_ends_at, owner_user_id, currency, created_at, email, phone, country"),
+    admin.from("company_subscriptions").select("*"),
+    admin.from("profiles").select("id", { count: "exact", head: true }).neq("role", "platform_owner"),
+    admin.from("profiles").select("id", { count: "exact", head: true }).neq("role", "platform_owner").neq("active", 0),
+    admin.from("branches").select("id", { count: "exact", head: true }),
+    admin.from("audit_log").select("*").order("created_at", { ascending: false }).limit(100),
+    admin.from("company_settings").select("company_id, settings"),
+  ]);
 
-  const { data: subscriptions } = await admin.from("company_subscriptions").select("*");
-  const { data: audit } = await admin.from("audit_log").select("*").order("created_at", { ascending: false }).limit(500);
+  if (companiesRes.error && !isMissingTableError(companiesRes.error)) throw companiesRes.error;
 
-  const subs = subscriptions || [];
+  const companies = companiesRes.data || [];
+  const subs = subscriptionsRes.data || [];
+  const settingsByCompany = new Map();
+  for (const row of settingsRes.data || []) {
+    settingsByCompany.set(
+      Number(row.company_id),
+      row.settings && typeof row.settings === "object" ? row.settings : {}
+    );
+  }
+  const subByCompany = new Map(subs.map((row) => [Number(row.company_id), row]));
+
+  let activeCompanies = 0;
+  let suspendedCompanies = 0;
+  let expiredCompanies = 0;
+  for (const company of companies) {
+    const ds = deriveCompanyDisplayStatus(
+      company,
+      subByCompany.get(Number(company.id)),
+      settingsByCompany.get(Number(company.id)) || {}
+    );
+    if (ds === "active") activeCompanies += 1;
+    if (ds === "suspended") suspendedCompanies += 1;
+    if (ds === "expired") expiredCompanies += 1;
+  }
+
   const statusCounts = Object.fromEntries(
     ["active", "trialing", "suspended", "expired", "cancelled", "inactive", "past_due"].map((status) => [
       status,
       subs.filter((row) => {
-        if (status === "suspended") return row.status === "inactive" && overview.companies.some((c) => Number(c.id) === Number(row.company_id) && c.display_status === "suspended");
-        if (status === "expired") return overview.companies.some((c) => Number(c.id) === Number(row.company_id) && c.display_status === "expired");
+        if (status === "suspended") {
+          return row.status === "inactive" && suspendedCompanies > 0
+            && deriveCompanyDisplayStatus(
+              companies.find((c) => Number(c.id) === Number(row.company_id)),
+              row,
+              settingsByCompany.get(Number(row.company_id)) || {}
+            ) === "suspended";
+        }
+        if (status === "expired") {
+          return deriveCompanyDisplayStatus(
+            companies.find((c) => Number(c.id) === Number(row.company_id)),
+            row,
+            settingsByCompany.get(Number(row.company_id)) || {}
+          ) === "expired";
+        }
         return String(row.status) === status;
       }).length,
     ])
@@ -353,8 +564,6 @@ async function getPlatformConsole(admin, caller) {
       const count = subs.filter((s) => normalizePlanCode(s.plan_code) === plan.code && ["active", "trialing"].includes(s.status)).length;
       return sum + count * Number(plan.price_monthly || 0);
     }, 0);
-
-  const totalRevenueEstimate = overview.companies.reduce((sum, c) => sum + Number(c.sales_total || 0), 0);
 
   return {
     success: true,
@@ -376,19 +585,20 @@ async function getPlatformConsole(admin, caller) {
       require_verified_domains: false,
       note: "Domains / billing tables are not provisioned; settings are best-effort.",
     },
-    audit: audit || [],
+    audit: auditRes.data || [],
     analytics: {
-      companies: overview.stats.companies,
-      active_companies: overview.stats.active_companies,
-      suspended_companies: overview.companies.filter((c) => c.display_status === "suspended").length,
-      users: overview.stats.users,
-      active_users: overview.stats.active_users,
-      branches: (overview.branches || []).length,
-      sales_total: totalRevenueEstimate,
+      companies: companies.length,
+      active_companies: activeCompanies,
+      suspended_companies: suspendedCompanies,
+      expired_companies: expiredCompanies,
+      users: Number(profileCountRes.count || 0),
+      active_users: Number(activeProfileRes.count || 0),
+      branches: Number(branchCountRes.count || 0),
+      sales_total: 0,
       monthly_revenue: monthlyRevenue,
-      total_revenue: totalRevenueEstimate,
+      total_revenue: 0,
       revenue_currency: BILLING_CURRENCY,
-      sales_currencies: [...new Set(overview.companies.map((c) => c.currency).filter(Boolean))],
+      sales_currencies: [...new Set(companies.map((c) => c.currency).filter(Boolean))],
       subscriptions_by_status: statusCounts,
       ai_usage: 0,
       ai_usage_label: "Not metered",
@@ -666,7 +876,7 @@ async function resetOwnerPassword(admin, caller, params = {}) {
 
   let ownerId = company.owner_user_id || params.owner_user_id || null;
   if (!ownerId) {
-    const users = await listAuthOwners(admin);
+    const users = await listOwnersForCompanies(admin, [company]);
     const owner = users.find((u) => Number(u.company_id) === companyId && normalizeRole(u.role) === "owner");
     ownerId = owner?.id || null;
   }
@@ -870,7 +1080,7 @@ export async function handlePlatformAction(admin, caller, action, params = {}) {
       return getOverview(admin, caller, params);
     case "platform.getConsole":
     case "owner.getPlatformConsole":
-      return getPlatformConsole(admin, caller);
+      return getPlatformConsole(admin, caller, params);
     case "platform.getCompany":
     case "owner.getCompanyDetail":
       return getCompanyDetail(admin, caller, params);

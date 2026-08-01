@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Edit3, LockKeyhole, Plus, Power, Trash2, Ban, Unlock,
-  LogOut, KeyRound, Search, ShieldAlert,
+  Edit3, Eye, LockKeyhole, Plus, Power, Trash2,
+  Search, ShieldAlert, Users as UsersIcon, UserCheck, UserX,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { canManageRole, isPlatformOwner, isUserManagerRole, roleLabel } from "../lib/rbac";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 
 function initials(name = "") {
   return name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
@@ -17,22 +18,25 @@ function date(value) {
   return value ? new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Never";
 }
 
-function money(value) {
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "KES", maximumFractionDigits: 0 }).format(Number(value || 0));
+function normalizeUsersPayload(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.users)) return payload.users;
+  return [];
 }
 
 function statusMeta(member) {
   const status = String(member.account_status || (member.active ? "active" : "inactive")).toLowerCase();
-  if (status === "suspended") return { label: "Suspended", className: "bg-[#FEF3C7] text-[#B45309]" };
-  if (status === "locked") return { label: "Locked", className: "bg-[#FEE2E2] text-[#B91C1C]" };
-  if (status === "inactive" || !member.active) return { label: "Inactive", className: "bg-[#F1F3F8] text-app-muted" };
-  return { label: "Active", className: "bg-[#E8FAEF] text-success" };
+  if (status === "suspended") return { label: "Suspended", className: "bg-[#FEF3C7] text-[#B45309]", key: "suspended" };
+  if (status === "locked") return { label: "Locked", className: "bg-[#FEE2E2] text-[#B91C1C]", key: "locked" };
+  if (status === "inactive" || !member.active) return { label: "Inactive", className: "bg-[#F1F3F8] text-app-muted", key: "inactive" };
+  return { label: "Active", className: "bg-[#E8FAEF] text-success", key: "active" };
 }
 
 export default function Users() {
   const { user, can } = useAuth();
   const { showToast } = useToast();
-  const [users, setUsers] = useState([]);
+  const location = useLocation();
+  const [users, setUsers] = useState(() => normalizeUsersPayload(location.state?.createdUser ? [location.state.createdUser] : []));
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -42,12 +46,32 @@ export default function Users() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const rows = await api.auth.listUsers();
-    setUsers(Array.isArray(rows) ? rows : []);
-    setLoading(false);
-  }, []);
+    try {
+      const rows = await api.auth.listUsers();
+      setUsers(normalizeUsersPayload(rows));
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[Users] listUsers", err);
+      setUsers([]);
+      showToast("Could not load users.");
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast]);
 
   useEffect(() => { load(); }, [load]);
+
+  // ERP real-time: user/role changes must reflect instantly for every admin.
+  useRealtimeRefresh(["auth"], load);
+
+  // Optimistic: merge a newly created user from navigation state until reload completes
+  useEffect(() => {
+    const created = location.state?.createdUser;
+    if (!created?.id) return;
+    setUsers((prev) => {
+      if (prev.some((row) => String(row.id) === String(created.id))) return prev;
+      return [created, ...prev];
+    });
+  }, [location.state]);
 
   const act = async (promise, successMessage) => {
     const result = await promise;
@@ -59,7 +83,6 @@ export default function Users() {
   const control = async (target, action, label) => {
     if (!window.confirm(`${label} ${target.name}?`)) return;
     const prev = users;
-    // Optimistic status flips for activate/deactivate/suspend/unlock
     if (["activate", "deactivate", "suspend", "unlock"].includes(action)) {
       setUsers((rows) =>
         rows.map((row) => {
@@ -99,6 +122,7 @@ export default function Users() {
       return [
         member.name, member.username, member.email, member.phone,
         member.employee_id, member.department, member.position, roleLabel(member.role),
+        member.branch_name,
       ].some((value) => String(value || "").toLowerCase().includes(q));
     });
   }, [users, query, statusFilter, roleFilter]);
@@ -108,18 +132,39 @@ export default function Users() {
     return [...set].sort();
   }, [users]);
 
+  const totals = useMemo(() => {
+    const total = users.length;
+    const active = users.filter((row) => statusMeta(row).key === "active").length;
+    return { total, active, inactive: total - active };
+  }, [users]);
+
   return (
     <div className="animate-fadein">
       <div className="nx-page-header">
         <div>
           <h1 className="page-title">User Management</h1>
           <p className="mt-1 text-base text-app-muted">
-            Enterprise staff directory — profiles, roles, status, and security controls.
+            Company staff directory — every user in your tenant, with role and access controls.
           </p>
         </div>
         {accountManager && can("users", "create") && (
           <Link to="/users/new" className="btn btn-primary"><Plus size={16} /> New User</Link>
         )}
+      </div>
+
+      <div className="mb-5 grid gap-3 sm:grid-cols-3">
+        <div className="rounded-[12px] border border-app bg-app-panel px-4 py-3">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-app-muted"><UsersIcon size={14} /> Total users</div>
+          <div className="mt-1 text-2xl font-semibold text-app-text">{totals.total}</div>
+        </div>
+        <div className="rounded-[12px] border border-app bg-app-panel px-4 py-3">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-app-muted"><UserCheck size={14} /> Active</div>
+          <div className="mt-1 text-2xl font-semibold text-success">{totals.active}</div>
+        </div>
+        <div className="rounded-[12px] border border-app bg-app-panel px-4 py-3">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-app-muted"><UserX size={14} /> Inactive</div>
+          <div className="mt-1 text-2xl font-semibold text-app-muted">{totals.inactive}</div>
+        </div>
       </div>
 
       {!accountManager && (
@@ -154,10 +199,10 @@ export default function Users() {
 
       <div className="table-container">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1280px]">
+          <table className="w-full min-w-[1100px]">
             <thead>
               <tr className="bg-app-panel-muted">
-                {["User", "Employee", "Contact", "Role / Branch", "Status", "Activity", "Device", "Sales", "Actions"].map((heading) => (
+                {["Name", "Email", "Role", "Branch", "Status", "Last Login", "Active / Inactive", "Actions"].map((heading) => (
                   <th key={heading} className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-app-muted">{heading}</th>
                 ))}
               </tr>
@@ -165,6 +210,7 @@ export default function Users() {
             <tbody>
               {filtered.map((member) => {
                 const status = statusMeta(member);
+                const isActive = status.key === "active";
                 const canAct = accountManager && member.id !== user.id && canManageRole(user.role, member.role, { allowOwnerPeer });
                 return (
                   <tr key={member.id} className="border-t border-app align-top hover:bg-app">
@@ -176,24 +222,14 @@ export default function Users() {
                             : initials(member.name)}
                         </div>
                         <div>
-                          <div className="text-sm font-semibold text-app-text">{member.name}</div>
-                          <div className="text-xs text-app-muted">@{member.username}</div>
-                          <div className="mt-0.5 font-mono text-[10px] text-app-muted">ID {String(member.id).slice(0, 8)}…</div>
+                          <div className="text-sm font-semibold text-app-text">{member.name || "—"}</div>
+                          <div className="text-xs text-app-muted">@{member.username || "—"}</div>
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-sm">
-                      <div className="font-medium">{member.employee_id || "—"}</div>
-                      <div className="mt-1 text-xs text-app-muted">{member.department || "No dept"} · {member.position || "—"}</div>
-                    </td>
-                    <td className="px-4 py-3 text-sm">
-                      <div>{member.email}</div>
-                      <div className="mt-1 text-xs text-app-muted">{member.phone || "No phone"}</div>
-                    </td>
-                    <td className="px-4 py-3 text-sm">
-                      <div>{roleLabel(member.role)}</div>
-                      <div className="mt-1 text-xs text-app-muted">{member.branch_name || "—"}</div>
-                    </td>
+                    <td className="px-4 py-3 text-sm">{member.email || "—"}</td>
+                    <td className="px-4 py-3 text-sm">{roleLabel(member.role)}</td>
+                    <td className="px-4 py-3 text-sm text-app-muted">{member.branch_name || "—"}</td>
                     <td className="px-4 py-3">
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${status.className}`}>{status.label}</span>
                       {member.login_enabled === 0 || member.login_enabled === false ? (
@@ -203,80 +239,48 @@ export default function Users() {
                         <div className="mt-1 inline-flex items-center gap-1 text-[10px] text-[#B45309]"><ShieldAlert size={10} /> Force pwd</div>
                       ) : null}
                     </td>
-                    <td className="px-4 py-3 text-xs text-app-muted">
-                      <div>Login: {date(member.last_login_at)}</div>
-                      <div className="mt-1">Active: {date(member.last_activity_at)}</div>
-                      <div className="mt-1">Count: {Number(member.login_count || 0)}</div>
-                      <div className="mt-1">Created: {date(member.created_at)}</div>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-app-muted">
-                      <div>{member.last_device || "—"}</div>
-                      <div className="mt-1">{member.last_browser || "—"} · {member.last_os || "—"}</div>
-                      <div className="mt-1 font-mono">{member.last_ip || "No IP"}</div>
-                    </td>
-                    <td className="px-4 py-3 text-sm">
-                      <div className="font-semibold">{money(member.total_revenue)}</div>
-                      <div className="mt-1 text-xs text-app-muted">{member.total_sales || 0} txns</div>
+                    <td className="px-4 py-3 text-xs text-app-muted">{date(member.last_login_at)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`text-sm font-medium ${isActive ? "text-success" : "text-app-muted"}`}>
+                        {isActive ? "Active" : "Inactive"}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
-                      {canAct ? (
-                        <div className="flex max-w-[320px] flex-wrap gap-1.5">
-                          <Link to={`/users/${member.id}/edit`} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                            <Edit3 size={12} /> Edit
-                          </Link>
-                          {can("users", "edit") && (
-                            <>
-                              <button type="button" onClick={() => resetPassword(member)} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <LockKeyhole size={12} /> Password
-                              </button>
-                              <button type="button" onClick={() => control(member, member.active ? "deactivate" : "activate", member.active ? "Deactivate" : "Activate")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <Power size={12} /> {member.active ? "Deactivate" : "Activate"}
-                              </button>
-                              <button type="button" onClick={() => control(member, "suspend", "Suspend")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <Ban size={12} /> Suspend
-                              </button>
-                              <button type="button" onClick={() => control(member, "unlock", "Unlock")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <Unlock size={12} /> Unlock
-                              </button>
-                              <button type="button" onClick={() => control(member, "force_logout", "Force logout")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <LogOut size={12} /> Force logout
-                              </button>
-                              <button type="button" onClick={() => control(member, "force_password_change", "Force password change")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
-                                <KeyRound size={12} /> Force pwd
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => control(
-                                  member,
-                                  member.login_enabled === false || member.login_enabled === 0 ? "enable_login" : "disable_login",
-                                  member.login_enabled === false || member.login_enabled === 0 ? "Enable login" : "Disable login"
-                                )}
-                                className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs"
-                              >
-                                {member.login_enabled === false || member.login_enabled === 0 ? "Enable login" : "Disable login"}
-                              </button>
-                            </>
-                          )}
-                          {can("users", "delete") && (
-                            <button
-                              type="button"
-                              disabled={member.id === user.id}
-                              onClick={() => window.confirm(`Permanently delete ${member.name}? Historical sale snapshots will remain.`) && act(api.auth_admin.deleteUser(member.id), "User deleted")}
-                              className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-[#FBD5D5] px-2 text-xs text-danger disabled:opacity-40"
-                            >
-                              <Trash2 size={12} /> Delete
+                      <div className="flex max-w-[360px] flex-wrap gap-1.5">
+                        <Link to={`/users/${member.id}/edit`} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
+                          <Eye size={12} /> View
+                        </Link>
+                        {canAct && can("users", "edit") && (
+                          <>
+                            <Link to={`/users/${member.id}/edit`} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
+                              <Edit3 size={12} /> Edit
+                            </Link>
+                            <button type="button" onClick={() => resetPassword(member)} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
+                              <LockKeyhole size={12} /> Reset Password
                             </button>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-app-muted">View only</span>
-                      )}
+                            <button type="button" onClick={() => control(member, member.active ? "deactivate" : "activate", member.active ? "Deactivate" : "Activate")} className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-app px-2 text-xs">
+                              <Power size={12} /> {member.active ? "Deactivate" : "Activate"}
+                            </button>
+                          </>
+                        )}
+                        {canAct && can("users", "delete") && (
+                          <button
+                            type="button"
+                            disabled={member.id === user.id}
+                            onClick={() => window.confirm(`Permanently delete ${member.name}? Historical sale snapshots will remain.`) && act(api.auth_admin.deleteUser(member.id), "User deleted")}
+                            className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-[#FBD5D5] px-2 text-xs text-danger disabled:opacity-40"
+                          >
+                            <Trash2 size={12} /> Delete
+                          </button>
+                        )}
+                        {!canAct && <span className="self-center text-xs text-app-muted">View only</span>}
+                      </div>
                     </td>
                   </tr>
                 );
               })}
-              {loading && <tr><td colSpan={9} className="py-12 text-center text-sm text-app-muted">Loading users…</td></tr>}
-              {!loading && filtered.length === 0 && <tr><td colSpan={9} className="py-12 text-center text-sm text-app-muted">No users match your filters.</td></tr>}
+              {loading && <tr><td colSpan={8} className="py-12 text-center text-sm text-app-muted">Loading users…</td></tr>}
+              {!loading && filtered.length === 0 && <tr><td colSpan={8} className="py-12 text-center text-sm text-app-muted">No users match your filters.</td></tr>}
             </tbody>
           </table>
         </div>

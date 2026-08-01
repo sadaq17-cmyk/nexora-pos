@@ -62,18 +62,23 @@ export default function BarcodePage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [st, stg] = await Promise.all([api.barcode.listStatus(), api.settings.getAll()]);
-    setStatus(st);
-    setSettings(stg);
-    const idsParam = searchParams.get("ids");
-    if (idsParam) {
-      const ids = idsParam
-        .split(",")
-        .map((x) => Number(x))
-        .filter(Boolean);
-      if (ids.length) setSelected(new Set(ids));
+    try {
+      const [st, stg] = await Promise.all([api.barcode.listStatus(), api.settings.getAll()]);
+      setStatus(st);
+      setSettings(stg);
+      const idsParam = searchParams.get("ids");
+      if (idsParam) {
+        const ids = idsParam
+          .split(",")
+          .map((x) => Number(x))
+          .filter(Boolean);
+        if (ids.length) setSelected(new Set(ids));
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[Barcode] load failed", err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [searchParams]);
 
   useEffect(() => {

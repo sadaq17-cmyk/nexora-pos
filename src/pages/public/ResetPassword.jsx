@@ -9,17 +9,15 @@ const EMAIL_NOT_SENT_MESSAGE = "We couldn't send the email right now. Please try
 
 async function notifyPasswordChanged({ to, name }) {
   try {
-    const response = await fetch("/api/send-email", {
+    const data = await authFetch("/api/send-email", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "password_changed", to, name }),
+      body: { type: "password_changed", to, name },
     });
-    const data = await response.json().catch(() => null);
-    if (!response.ok || !data?.success) {
-      console.error("[ResetPassword] password_changed notification failed:", data?.error || EMAIL_NOT_SENT_MESSAGE);
+    if (!data?.success) {
+      if (import.meta.env.DEV) console.error("[ResetPassword] password_changed notification failed:", data?.error || EMAIL_NOT_SENT_MESSAGE);
     }
   } catch (err) {
-    console.error("[ResetPassword] password_changed notification error:", err);
+    if (import.meta.env.DEV) console.error("[ResetPassword] password_changed notification error:", err);
   }
 }
 
@@ -95,7 +93,7 @@ export default function ResetPassword() {
           <div className="nx-login-brand-mark" aria-hidden>
             <Store size={24} />
           </div>
-          <h1>Nexora POS</h1>
+          <h1>Nexora POS Pro</h1>
           <p>Choose a new password for your account.</p>
         </div>
         <div className="nx-login-card">

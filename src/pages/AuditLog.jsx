@@ -66,9 +66,15 @@ export default function AuditLog() {
 
   const load = async (m) => {
     setLoading(true);
-    const rows = await api.audit.getAll({ module: m || undefined, limit: 500 });
-    setLogs(Array.isArray(rows) ? rows : []);
-    setLoading(false);
+    try {
+      const rows = await api.audit.getAll({ module: m || undefined, limit: 500 });
+      setLogs(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[AuditLog] load failed", err);
+      setLogs([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(module); }, [module]);

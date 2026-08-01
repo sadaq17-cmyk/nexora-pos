@@ -14,7 +14,7 @@ Enterprise Supplier Management is upgraded on the existing Nexora schema and UI 
 |------|--------|
 | `npm run build` | **PASS** |
 | Migration `015` `supabase db push --linked` | **PASS** (applied) |
-| Vercel production deploy | **PASS** — https://www.httpsnexorapos.com (alias); inspect https://vercel.com/nexoraposapp/nexora-pos/DiPZUthJbnDg9c9VbaJHzVak1sA5 |
+| Vercel production deploy | **PASS** — https://www.nexorapospro.com (alias); inspect https://vercel.com/nexoraposapp/nexora-pos/DiPZUthJbnDg9c9VbaJHzVak1sA5 |
 | Git commit | **Not requested** — skipped |
 
 ---

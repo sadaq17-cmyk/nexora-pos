@@ -8,6 +8,7 @@ import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { DEFAULT_PAGE_SIZE } from "../lib/requestCache";
 const emptyForm = { name: "", phone: "", email: "", address: "", credit_limit: "0" };
@@ -163,6 +164,14 @@ export default function Customers() {
     setStatement(data);
     if (data?.customer) setDetailFor(data.customer);
   };
+
+  // ERP real-time: every sale/payment updates customer balances and history —
+  // keep the list and any open statement panel in sync automatically.
+  useRealtimeRefresh(
+    ["customers", "sales"],
+    () => (detailFor ? refreshDetail() : load()),
+    { debounceMs: 800 }
+  );
 
   const recordPayment = async () => {
     const amount = parseFloat(paymentAmount);

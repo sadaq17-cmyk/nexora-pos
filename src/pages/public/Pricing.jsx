@@ -29,8 +29,8 @@ export default function Pricing() {
   return (
     <div>
       <Seo
-        title="Pricing — Nexora POS"
-        description={`Nexora POS plans in KES: Starter, Business, Professional, and Enterprise. Every new company gets a ${DEFAULT_TRIAL_DAYS}-day free trial with all Enterprise features.`}
+        title="Pricing — Nexora POS Pro"
+        description={`Nexora POS Pro plans in KES: Starter, Business, Professional, and Enterprise. Every new company gets a ${DEFAULT_TRIAL_DAYS}-day free trial with all Enterprise features.`}
       />
 
       <section className="nx-section" style={{ paddingTop: "3.5rem", textAlign: "center" }}>

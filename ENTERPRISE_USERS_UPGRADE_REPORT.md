@@ -93,5 +93,13 @@
 - **Commit:** Skipped (not requested).
 - **Production deploy:** **Succeeded** via `npx vercel --prod --yes` (retry after transient `fetch failed`).
 - **Inspect:** https://vercel.com/nexoraposapp/nexora-pos/BSbq8fonPT8jjWq9uJzcBTm5xbPU
-- **Production URL:** https://www.httpsnexorapos.com (custom domain) / Vercel alias from deploy output.
+- **Production URL:** https://www.nexorapospro.com (custom domain) / Vercel alias from deploy output.
 - **Note:** Apply migration `011` in Supabase for full profile column sync; Auth `app_metadata` path works without it for most UI fields.
+
+---
+
+## Fix note — empty User Management list (2026-07-23)
+
+**Root cause:** Production `listUsers` returned `{ success, users }` but the UI only accepted a bare array → always showed empty. Create/login were healthy.
+
+**Fix:** Unwrap in `supabaseApi.auth.listUsers`; harden `admin-list-users` (Auth + profiles merge, branch names, totals); optimistic create → list handoff in `UserForm` / `Users`. Details: `USER_MANAGEMENT_FIX_REPORT.md`.

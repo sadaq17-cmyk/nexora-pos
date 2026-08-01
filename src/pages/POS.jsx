@@ -23,6 +23,7 @@ import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { useBarcodeScanner } from "../hooks/useBarcodeScanner";
 import { useOfflineSync } from "../hooks/useOfflineSync";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import {
   isBrowserOnline,
   isQueueableSaleFailure,
@@ -33,7 +34,6 @@ import {
   CARD_BRANDS,
   DEFAULT_PAYMENT_METHOD,
   isPaymentMethodEnabled,
-  paymentMethodLabel,
   validateSalePayment,
 } from "../lib/paymentMethods";
 import ReceiptDocument from "../components/ReceiptDocument";
@@ -50,7 +50,7 @@ const CATEGORY_COLORS = {
 };
 
 const SHORTCUTS = [
-  ["Enter", "Confirm sale"],
+  ["Enter", "Complete sale"],
   ["F1", "Search product"],
   ["F2", "New sale"],
   ["F3", "Hold sale"],
@@ -130,25 +130,37 @@ export default function POS() {
   const loadHeld = useCallback(async () => setHeldSales(await api.sales.getHeld()), []);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const [productRows, customerRows, heldRows, categoryRows] = await Promise.all([
-        api.products.getAll(),
-        api.customers.getAll(),
-        api.sales.getHeld(),
-        api.categories.getAll(),
-      ]);
-      setProducts(isProductionDataPlane ? excludeDemoProducts(productRows) : productRows);
-      setCustomers(customerRows);
-      setHeldSales(heldRows);
-      setCategories((categoryRows || []).filter(isCategoryActive));
-      setLoading(false);
-      focusBarcode();
+      try {
+        const [productRows, customerRows, heldRows, categoryRows] = await Promise.all([
+          api.products.getAll(),
+          api.customers.getAll(),
+          api.sales.getHeld(),
+          api.categories.getAll(),
+        ]);
+        if (cancelled) return;
+        setProducts(isProductionDataPlane ? excludeDemoProducts(productRows) : productRows);
+        setCustomers(customerRows);
+        setHeldSales(heldRows);
+        setCategories((categoryRows || []).filter(isCategoryActive));
+        focusBarcode();
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[POS] load failed", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
+    return () => { cancelled = true; };
   }, [focusBarcode]);
 
   useEffect(() => {
     if (!vatEnabled) setApplyVat(false);
   }, [vatEnabled]);
+
+  // ERP real-time: stock/price changes from any terminal, purchase receipt,
+  // or product edit must reach every open register instantly.
+  useRealtimeRefresh(["products", "inventory", "purchases"], loadProducts, { debounceMs: 700 });
 
   // Keep barcode field ready after dialogs / non-text interactions.
   useEffect(() => {
@@ -261,6 +273,12 @@ export default function POS() {
     card_brand: cardBrand,
     mpesa_reference: payment === "MPESA" ? paymentRef : "",
   }), [payment, total, cashTendered, cardBrand, paymentRef]);
+
+  const canCompleteSale = useMemo(() => {
+    if (!cart.length) return false;
+    if (!isPaymentMethodEnabled(payment)) return false;
+    return Boolean(validateSalePayment(paymentPayload).success);
+  }, [cart.length, payment, paymentPayload]);
 
   const validateCart = useCallback(() => {
     if (cart.length === 0) return "Add at least one product";
@@ -377,8 +395,10 @@ export default function POS() {
       setCustomerId("");
       setCashTendered("");
       setPaymentRef("");
+      setCardBrand("VISA");
       setApplyVat(false);
       setSearch("");
+      setBarcode("");
       setPayment(DEFAULT_PAYMENT_METHOD);
       showToast(
         offlineSaved
@@ -465,7 +485,10 @@ export default function POS() {
     setCustomerId("");
     setCashTendered("");
     setPaymentRef("");
+    setCardBrand("VISA");
     setApplyVat(false);
+    setSearch("");
+    setBarcode("");
     setPayment(DEFAULT_PAYMENT_METHOD);
     focusBarcode();
   }, [cart.length, focusBarcode]);
@@ -856,10 +879,6 @@ export default function POS() {
                 <div className="nx-pos-total-row"><span>Tax ({vatRate}%)</span><span>{formatMoney(vat)}</span></div>
               )}
               <div className="nx-pos-total-row is-grand"><span>Grand Total</span><span>{formatMoney(total)}</span></div>
-              <div className="nx-pos-total-row is-pay">
-                <span>Payment</span>
-                <span>{paymentMethodLabel(payment)}{payment === "CARD" ? ` · ${cardBrand}` : ""}</span>
-              </div>
             </div>
 
             <div className="nx-pay-grid" role="group" aria-label="Payment methods">
@@ -890,7 +909,7 @@ export default function POS() {
                     onChange={(event) => setCashTendered(event.target.value)}
                     onFocus={() => { focusTargetRef.current = "cash"; }}
                     onKeyDown={handleCashEnter}
-                    placeholder={`Cash (F6) · Exact ${formatMoney(total)}`}
+                    placeholder={`Exact ${formatMoney(total)}`}
                     className="nx-receipt-input"
                     aria-label="Cash tendered"
                   />
@@ -930,13 +949,24 @@ export default function POS() {
               )}
             </div>
 
-            <div className="nx-pos-actions">
-              <button type="button" onClick={holdSale} disabled={!cart.length || submitting} className="btn btn-secondary">
-                <Pause size={16} aria-hidden /> Hold
+            <div className="nx-pos-checkout">
+              <button
+                type="button"
+                onClick={holdSale}
+                disabled={!cart.length || submitting}
+                className="nx-pos-hold-btn"
+                title="Hold sale"
+              >
+                <Pause size={15} aria-hidden /> Hold
               </button>
-              <button type="button" onClick={completeSale} disabled={!cart.length || submitting} className="btn btn-primary">
-                <Check size={16} aria-hidden />
-                {submitting ? "…" : "Confirm"}
+              <button
+                type="button"
+                onClick={completeSale}
+                disabled={!canCompleteSale || submitting}
+                className="nx-pos-complete-btn"
+              >
+                <Check size={18} aria-hidden />
+                {submitting ? "Processing…" : "Complete Sale"}
               </button>
             </div>
           </div>

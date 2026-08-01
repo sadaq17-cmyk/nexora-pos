@@ -3,7 +3,7 @@
  * Barcode always encodes the receipt number exactly (CODE128).
  */
 
-const PUBLIC_ORIGIN = "https://www.httpsnexorapos.com";
+const PUBLIC_ORIGIN = "https://www.nexorapospro.com";
 
 export function formatReceiptNumber(saleId, createdAt = new Date()) {
   const date = createdAt instanceof Date ? createdAt : new Date(createdAt || Date.now());
@@ -24,7 +24,7 @@ export function invoicePublicOrigin() {
   if (typeof window === "undefined") return PUBLIC_ORIGIN;
   const origin = String(window.location?.origin || "").replace(/\/$/, "");
   // Use the active site origin so QR scans open this environment's verify page.
-  // Production deployments resolve to https://www.httpsnexorapos.com/...
+  // Production deployments resolve to https://www.nexorapospro.com/...
   return origin || PUBLIC_ORIGIN;
 }
 

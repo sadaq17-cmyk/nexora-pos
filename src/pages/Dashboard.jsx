@@ -1,46 +1,44 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  BarChart3,
+  Boxes,
   Building2,
   ChevronDown,
   Database,
   KeyRound,
+  Package,
+  PackageX,
   Server,
   Shield,
+  ShoppingCart,
+  Truck,
   UserCheck,
+  UserPlus,
   UserX,
   Users,
+  Wallet,
   Wifi,
   WifiOff,
 } from "lucide-react";
-import {
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-} from "recharts";
 import { api } from "../lib/api";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { getReportRange } from "../lib/reportDates";
 import { useAuth } from "../context/AuthContext";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { isOwner, isPlatformOwner, isSuperAdmin, normalizeRole, roleLabel, SYSTEM_ROLES } from "../lib/rbac";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DashboardSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
-const CHART_TOOLTIP = {
-  borderRadius: 8,
-  borderColor: "var(--app-border)",
-  fontSize: 12,
-  boxShadow: "var(--shadow-card)",
-  background: "var(--app-panel)",
-  color: "var(--app-text)",
-};
+const SalesTrendChart = lazy(() =>
+  import("../components/DashboardCharts").then((m) => ({ default: m.SalesTrendChart }))
+);
+const PurchasesTrendChart = lazy(() =>
+  import("../components/DashboardCharts").then((m) => ({ default: m.PurchasesTrendChart }))
+);
 
 const fmtDate = (ts) =>
   new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -105,11 +103,46 @@ function HealthChip({ ok, label }) {
   );
 }
 
+/** Always settles — never leave dashboard loaders Pending forever. */
+function settle(promise, fallback, ms = 12_000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), Math.max(500, ms));
+    Promise.resolve(promise).then(
+      (value) => finish(value),
+      () => finish(fallback)
+    );
+  });
+}
+
+function emptyWeekReport() {
+  return { cards: { today: {}, month: {} }, charts: { daily: [] }, topProducts: [] };
+}
+
+const QUICK_ACTIONS = [
+  { to: "/pos", label: "New Sale", icon: ShoppingCart, module: "pos", action: "create" },
+  { to: "/products", label: "Add Product", icon: Package, module: "products", action: "create" },
+  { to: "/customers", label: "Add Customer", icon: UserPlus, module: "customers", action: "create" },
+  { to: "/inventory", label: "Stock Count", icon: Boxes, module: "inventory", action: "view" },
+  { to: "/reports", label: "View Reports", icon: BarChart3, module: "reports", action: "view" },
+];
+
 export default function Dashboard() {
   const { formatMoney: money } = useEnterpriseSettings();
-  const { user } = useAuth();
+  const { user, can } = useAuth();
   const navigate = useNavigate();
   const ownerView = isOwnerDashboardRole(user?.role);
+
+  const quickActions = useMemo(
+    () => QUICK_ACTIONS.filter((item) => (typeof can === "function" ? can(item.module, item.action) : true)),
+    [can]
+  );
 
   const [summary, setSummary] = useState({ today: 0, todayCount: 0 });
   const [customerCount, setCustomerCount] = useState(0);
@@ -120,6 +153,7 @@ export default function Dashboard() {
   const [todayProfit, setTodayProfit] = useState(0);
   const [loading, setLoading] = useState(true);
   const [ownerOpen, setOwnerOpen] = useState(false);
+  const [ownerLoading, setOwnerLoading] = useState(false);
   const [team, setTeam] = useState([]);
   const [cashiers, setCashiers] = useState([]);
   const [branches, setBranches] = useState([]);
@@ -128,104 +162,181 @@ export default function Dashboard() {
   const [license, setLicense] = useState(null);
   const [rolesMatrix, setRolesMatrix] = useState(null);
   const [companyPerf, setCompanyPerf] = useState({ monthSales: 0, monthProfit: 0, monthExpenses: 0, margin: null });
+  const [payrollDash, setPayrollDash] = useState(null);
+  const [extended, setExtended] = useState({
+    purchasesToday: 0,
+    inventoryValue: 0,
+    totalProducts: 0,
+    outOfStock: 0,
+    totalSuppliers: 0,
+    outstandingReceivables: 0,
+    outstandingPayables: 0,
+    topCustomers: [],
+    topSuppliers: [],
+    monthlyPurchases: [],
+  });
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // Enterprise ERP requirement: dashboard updates instantly after any
+  // transaction anywhere in the company — no manual refresh.
+  useRealtimeRefresh(
+    ["sales", "purchases", "products", "inventory", "suppliers", "customers", "expenses", "branches"],
+    () => setRefreshTick((n) => n + 1),
+    { debounceMs: 900 }
+  );
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const ownerFetches = ownerView
-          ? [
-              api.users.getDashboard().catch(() => null),
-              api.branches?.getAll?.().catch(() => []) ?? Promise.resolve([]),
-              api.audit.getLoginHistory().catch(() => []),
-              api.health?.probe?.().catch(() => null) ?? Promise.resolve(null),
-              api.subscription.get().catch(() => null),
-              api.permissions?.getMatrix?.().catch(() => null) ?? Promise.resolve(null),
-            ]
-          : [
-              Promise.resolve(null),
-              Promise.resolve([]),
-              Promise.resolve([]),
-              Promise.resolve(null),
-              Promise.resolve(null),
-              Promise.resolve(null),
-            ];
 
+    const applyCritical = (lowStockRows, customerCountResult, recentRows, weekReport) => {
+      const report = weekReport && typeof weekReport === "object" && weekReport.success !== false
+        ? weekReport
+        : emptyWeekReport();
+      setLowStockItems(Array.isArray(lowStockRows) ? lowStockRows : []);
+      setCustomerCount(Number(customerCountResult?.count) || 0);
+      setRecent(Array.isArray(recentRows) ? recentRows : []);
+      setSummary({
+        today: Number(report.cards?.today?.revenue) || 0,
+        todayCount: Number(report.cards?.today?.transactions) || 0,
+      });
+      setTodayProfit(Number(report.cards?.today?.netProfit) || 0);
+      const dailyRows = Array.isArray(report.charts?.daily) ? report.charts.daily : [];
+      setTrend(
+        dailyRows.map((row) => ({
+          day: String(row?.date || "").slice(5),
+          sales: Number(row?.sales) || 0,
+        }))
+      );
+      setTopProducts(Array.isArray(report.topProducts) ? report.topProducts.slice(0, 8) : []);
+      setCompanyPerf({
+        monthSales: Number(report.cards?.month?.revenue) || 0,
+        monthProfit: Number(report.cards?.month?.netProfit) || 0,
+        monthExpenses: Number(report.cards?.month?.expenses) || 0,
+        margin: report.cards?.month?.profitMargin ?? null,
+      });
+    };
+
+    const applyExtended = (stats) => {
+      const s = stats && typeof stats === "object" && stats.success !== false ? stats : null;
+      setExtended({
+        purchasesToday: Number(s?.purchases_today) || 0,
+        inventoryValue: Number(s?.inventory_value) || 0,
+        totalProducts: Number(s?.total_products) || 0,
+        outOfStock: Number(s?.out_of_stock) || 0,
+        totalSuppliers: Number(s?.total_suppliers) || 0,
+        outstandingReceivables: Number(s?.outstanding_receivables) || 0,
+        outstandingPayables: Number(s?.outstanding_payables) || 0,
+        topCustomers: Array.isArray(s?.top_customers) ? s.top_customers : [],
+        topSuppliers: Array.isArray(s?.top_suppliers) ? s.top_suppliers : [],
+        monthlyPurchases: Array.isArray(s?.monthly_purchases) ? s.monthly_purchases : [],
+      });
+    };
+
+    (async () => {
+      setLoading(refreshTick === 0);
+      try {
+        // Phase 1 — paint KPI shell ASAP (no extended catalog scans).
+        const [lowStockRows, customerCountResult, recentRows, weekReport] = await Promise.all([
+          settle(api.inventory.getLowStock({ limit: 12 }), [], 10_000),
+          settle(api.customers.getCount?.() ?? Promise.resolve({ count: 0 }), { count: 0 }, 8_000),
+          settle(api.sales.getRecent(8), [], 10_000),
+          settle(api.reports.getAnalytics(getReportRange("this_week")), null, 12_000),
+        ]);
+        if (cancelled) return;
+        applyCritical(lowStockRows, customerCountResult, recentRows, weekReport);
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[Dashboard] critical load failed", err);
+        if (!cancelled) applyCritical([], { count: 0 }, [], null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+
+      if (cancelled) return;
+
+      // Phase 2 — extended stats after first paint (skip on realtime ticks to cut noise).
+      if (refreshTick === 0) {
+        try {
+          const extendedStats = await settle(
+            api.dashboard?.getExtendedStats?.() ?? Promise.resolve(null),
+            null,
+            12_000
+          );
+          if (!cancelled) applyExtended(extendedStats);
+        } catch {
+          /* non-blocking */
+        }
+      }
+
+      if (cancelled || !ownerView || refreshTick > 0) return;
+
+      // Owner diagnostics load in the background — never block the KPI shell.
+      // Skipped on real-time refresh ticks; only the KPI shell above needs
+      // to stay instantly in sync with every transaction.
+      setOwnerLoading(true);
+      try {
         const [
-          lowStockRows,
-          customerCountResult,
-          recentRows,
-          weekReport,
           teamResult,
           branchRows,
           loginRows,
           healthProbe,
           subscription,
           matrix,
+          payrollOverview,
         ] = await Promise.all([
-          api.inventory.getLowStock({ limit: 12 }).catch(() => []),
-          api.customers.getCount?.().catch(() => ({ count: 0 })) ?? Promise.resolve({ count: 0 }),
-          api.sales.getRecent(8).catch(() => []),
-          api.reports.getAnalytics(getReportRange("this_week")).catch(() => null),
-          ...ownerFetches,
+          settle(api.users.getDashboard(), null, 15_000),
+          settle(api.branches?.getAll?.() ?? Promise.resolve([]), [], 12_000),
+          settle(api.audit.getLoginHistory(), [], 12_000),
+          settle(api.health?.probe?.() ?? Promise.resolve(null), null, 18_000),
+          settle(api.subscription.get(), null, 12_000),
+          settle(api.permissions?.getMatrix?.() ?? Promise.resolve(null), null, 12_000),
+          settle(api.payroll?.getDashboard?.() ?? Promise.resolve(null), null, 12_000),
         ]);
-
         if (cancelled) return;
-
-        const report = weekReport || { cards: { today: {}, month: {} }, charts: { daily: [] }, topProducts: [] };
-
-        setLowStockItems(Array.isArray(lowStockRows) ? lowStockRows : []);
-        setCustomerCount(Number(customerCountResult?.count) || 0);
-        setRecent(Array.isArray(recentRows) ? recentRows : []);
-        setSummary({
-          today: report.cards?.today?.revenue || 0,
-          todayCount: report.cards?.today?.transactions || 0,
-        });
-        setTodayProfit(report.cards?.today?.netProfit || 0);
-        setTrend((report.charts?.daily || []).map((row) => ({
-          day: row.date?.slice(5),
-          sales: row.sales,
-        })));
-        setTopProducts((report.topProducts || []).slice(0, 8));
-        setCompanyPerf({
-          monthSales: report.cards?.month?.revenue || 0,
-          monthProfit: report.cards?.month?.netProfit || 0,
-          monthExpenses: report.cards?.month?.expenses || 0,
-          margin: report.cards?.month?.profitMargin,
-        });
-        setTeam(teamResult?.success ? teamResult.users : []);
-        setCashiers(teamResult?.success ? teamResult.cashiers : []);
+        const teamUsers = teamResult?.success && Array.isArray(teamResult.users) ? teamResult.users : [];
+        const teamCashiers = teamResult?.success && Array.isArray(teamResult.cashiers) ? teamResult.cashiers : [];
+        setTeam(teamUsers);
+        setCashiers(teamCashiers);
         setBranches(Array.isArray(branchRows) ? branchRows : []);
         setLoginHistory(Array.isArray(loginRows) ? loginRows.slice(0, 8) : []);
-        setHealth(healthProbe);
-        setLicense(subscription);
-        setRolesMatrix(matrix);
+        setHealth(healthProbe && typeof healthProbe === "object" ? healthProbe : null);
+        setLicense(subscription && typeof subscription === "object" ? subscription : null);
+        setRolesMatrix(matrix && typeof matrix === "object" ? matrix : null);
+        setPayrollDash(
+          payrollOverview && typeof payrollOverview === "object" && payrollOverview.success !== false
+            ? payrollOverview
+            : null
+        );
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[Dashboard] owner panel load failed", err);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setOwnerLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [user?.role, ownerView]);
+  }, [user?.role, ownerView, refreshTick]);
 
-  const onlineCount = team.filter((m) => m.online).length;
-  const offlineCount = Math.max(0, team.length - onlineCount);
-  const activeCount = team.filter((m) => m.active !== 0 && m.active !== false).length;
-  const inactiveCount = Math.max(0, team.length - activeCount);
-  const activeBranches = branches.filter((b) => b.active !== false && b.active !== 0).length;
+  const safeTeam = Array.isArray(team) ? team : [];
+  const safeCashiers = Array.isArray(cashiers) ? cashiers : [];
+  const safeBranches = Array.isArray(branches) ? branches : [];
+  const onlineCount = safeTeam.filter((m) => m?.online).length;
+  const offlineCount = Math.max(0, safeTeam.length - onlineCount);
+  const activeCount = safeTeam.filter((m) => m?.active !== 0 && m?.active !== false).length;
+  const inactiveCount = Math.max(0, safeTeam.length - activeCount);
+  const activeBranches = safeBranches.filter((b) => b?.active !== false && b?.active !== 0).length;
 
   const roleBreakdown = useMemo(() => {
     const counts = {};
-    for (const member of team) {
-      const role = normalizeRole(member.role);
+    for (const member of safeTeam) {
+      const role = normalizeRole(member?.role);
       counts[role] = (counts[role] || 0) + 1;
     }
     return Object.entries(counts)
       .map(([role, count]) => ({ role, label: roleLabel(role), count }))
       .sort((a, b) => b.count - a.count);
-  }, [team]);
+  }, [safeTeam]);
 
   const configuredRoles = useMemo(() => {
     if (rolesMatrix && typeof rolesMatrix === "object") {
@@ -272,6 +383,17 @@ export default function Dashboard() {
   const maxTopRevenue = useMemo(
     () => Math.max(1, ...topProducts.map((item) => Number(item.revenue || 0))),
     [topProducts]
+  );
+
+  const monthlyPurchasesChart = useMemo(
+    () =>
+      extended.monthlyPurchases.map((row) => ({
+        month: row.month
+          ? new Date(`${row.month}-01T00:00:00`).toLocaleString(undefined, { month: "short", year: "2-digit" })
+          : "",
+        total: Number(row.total) || 0,
+      })),
+    [extended.monthlyPurchases]
   );
 
   const businessInsights = useMemo(() => {
@@ -346,24 +468,43 @@ export default function Dashboard() {
         <MetricCard label="Customers" value={customerCount} />
       </div>
 
+      {/* Enterprise ERP KPIs — connected live across Purchases, Inventory, Suppliers, Customers */}
+      <div className="nx-dash-kpi-row-wide" role="region" aria-label="Enterprise ERP performance">
+        <MetricCard label="Today Purchases" value={money(extended.purchasesToday)} />
+        <MetricCard label="Inventory Value" value={money(extended.inventoryValue)} />
+        <MetricCard label="Total Products" value={extended.totalProducts} />
+        <MetricCard label="Out of Stock" value={extended.outOfStock} />
+        <MetricCard label="Suppliers" value={extended.totalSuppliers} />
+        <MetricCard label="Receivables" value={money(extended.outstandingReceivables)} />
+        <MetricCard label="Payables" value={money(extended.outstandingPayables)} />
+      </div>
+
+      {/* Quick actions */}
+      {quickActions.length > 0 && (
+        <Panel title="Quick Actions" meta="Shortcuts">
+          <div className="nx-quick-actions">
+            {quickActions.map((action) => (
+              <Button
+                key={action.to}
+                type="button"
+                variant="outline"
+                className="nx-quick-action-btn"
+                onClick={() => navigate(action.to)}
+              >
+                <action.icon size={16} aria-hidden />
+                {action.label}
+              </Button>
+            ))}
+          </div>
+        </Panel>
+      )}
+
       {/* Middle: Sales Trend | Top Selling Products */}
       <div className="nx-dash-mid-row">
         <Panel title="Sales Trend" meta="This week" empty={!trend.length} emptyText="No sales yet this week.">
-          <ResponsiveContainer width="100%" height={260}>
-            <AreaChart data={trend}>
-              <defs>
-                <linearGradient id="nxSalesFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--brand)" stopOpacity={0.28} />
-                  <stop offset="100%" stopColor="var(--brand)" stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--app-border)" />
-              <XAxis dataKey="day" tick={{ fontSize: 11 }} stroke="var(--app-muted)" />
-              <YAxis tick={{ fontSize: 11 }} stroke="var(--app-muted)" width={48} />
-              <Tooltip contentStyle={CHART_TOOLTIP} />
-              <Area type="monotone" dataKey="sales" stroke="var(--brand)" fill="url(#nxSalesFill)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
+          <Suspense fallback={<div className="h-[260px] animate-pulse rounded-md bg-app-border/40" aria-hidden />}>
+            <SalesTrendChart data={trend} />
+          </Suspense>
         </Panel>
 
         <Panel title="AI Business Insights" meta="Rule-based" empty={!businessInsights.length}>
@@ -375,6 +516,28 @@ export default function Dashboard() {
               </li>
             ))}
           </ul>
+        </Panel>
+      </div>
+
+      <div className="nx-dash-mid-row">
+        <Panel
+          title="Monthly Purchases"
+          meta="Last 6 months"
+          empty={!monthlyPurchasesChart.length}
+          emptyText="No purchases recorded yet."
+        >
+          <Suspense fallback={<div className="h-[220px] animate-pulse rounded-md bg-app-border/40" aria-hidden />}>
+            <PurchasesTrendChart data={monthlyPurchasesChart} />
+          </Suspense>
+        </Panel>
+
+        <Panel title="Outstanding Balances" meta="Receivables vs Payables" empty={false}>
+          <div className="nx-owner-grid">
+            <OwnerStat icon={Wallet} label="Receivables" value={money(extended.outstandingReceivables)} tone="success" />
+            <OwnerStat icon={Truck} label="Payables" value={money(extended.outstandingPayables)} tone="warning" />
+            <OwnerStat icon={PackageX} label="Out of Stock" value={extended.outOfStock} tone="danger" />
+            <OwnerStat icon={Package} label="Total Products" value={extended.totalProducts} tone="accent" />
+          </div>
         </Panel>
       </div>
 
@@ -413,6 +576,59 @@ export default function Dashboard() {
               </li>
             ))}
           </ul>
+        </Panel>
+      </div>
+
+      {/* Top Customers | Top Suppliers — connected live via Sales & Purchases */}
+      <div className="nx-dash-bot-row">
+        <Panel
+          title="Top Customers"
+          meta="By total spend"
+          empty={!extended.topCustomers.length}
+          emptyText="No customer purchases recorded yet."
+        >
+          <div className="nx-top-products">
+            {extended.topCustomers.map((c, index) => {
+              const max = Math.max(1, ...extended.topCustomers.map((x) => Number(x.revenue || 0)));
+              const width = Math.max(8, (Number(c.revenue || 0) / max) * 100);
+              return (
+                <div key={c.id || index} className="nx-top-sell-row">
+                  <div className="nx-top-sell-meta">
+                    <span className="nx-top-sell-name truncate">{c.name}</span>
+                    <span className="nx-top-sell-rev font-mono">{money(c.revenue)}</span>
+                  </div>
+                  <div className="nx-top-sell-track" aria-hidden>
+                    <div className="nx-top-sell-fill" style={{ width: `${width}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+
+        <Panel
+          title="Top Suppliers"
+          meta="By purchase volume"
+          empty={!extended.topSuppliers.length}
+          emptyText="No purchases recorded yet."
+        >
+          <div className="nx-top-products">
+            {extended.topSuppliers.map((s, index) => {
+              const max = Math.max(1, ...extended.topSuppliers.map((x) => Number(x.total || 0)));
+              const width = Math.max(8, (Number(s.total || 0) / max) * 100);
+              return (
+                <div key={s.id || index} className="nx-top-sell-row">
+                  <div className="nx-top-sell-meta">
+                    <span className="nx-top-sell-name truncate">{s.name}</span>
+                    <span className="nx-top-sell-rev font-mono">{money(s.total)}</span>
+                  </div>
+                  <div className="nx-top-sell-track" aria-hidden>
+                    <div className="nx-top-sell-fill" style={{ width: `${width}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </Panel>
       </div>
 
@@ -466,33 +682,38 @@ export default function Dashboard() {
 
           {ownerOpen && (
             <>
+              {ownerLoading && (
+                <div className="nx-dash-empty min-h-[48px] mb-3 text-sm text-app-muted">
+                  Loading owner diagnostics…
+                </div>
+              )}
               <div className="nx-owner-health-band">
-                <HealthChip ok={dbStatus.ok} label="Database" />
-                <HealthChip ok={healthSummary.ok} label="System" />
-                <HealthChip ok={licenseStatus.ok} label="License" />
-                <HealthChip ok={healthSummary.ok !== false} label="Backup" />
+                <HealthChip ok={ownerLoading ? null : dbStatus.ok} label="Database" />
+                <HealthChip ok={ownerLoading ? null : healthSummary.ok} label="System" />
+                <HealthChip ok={ownerLoading ? null : licenseStatus.ok} label="License" />
+                <HealthChip ok={ownerLoading ? null : healthSummary.ok !== false} label="Backup" />
               </div>
 
               <div className="nx-owner-grid">
-                <OwnerStat icon={Users} label="Total Users" value={team.length} />
-                <OwnerStat icon={Wifi} label="Online" value={onlineCount} tone="success" />
-                <OwnerStat icon={WifiOff} label="Offline" value={offlineCount} tone="muted" />
-                <OwnerStat icon={UserCheck} label="Active" value={activeCount} tone="success" />
-                <OwnerStat icon={UserX} label="Inactive" value={inactiveCount} tone="warning" />
-                <OwnerStat icon={Shield} label="Roles" value={configuredRoles} tone="accent" />
+                <OwnerStat icon={Users} label="Total Users" value={ownerLoading ? "—" : safeTeam.length} />
+                <OwnerStat icon={Wifi} label="Online" value={ownerLoading ? "—" : onlineCount} tone="success" />
+                <OwnerStat icon={WifiOff} label="Offline" value={ownerLoading ? "—" : offlineCount} tone="muted" />
+                <OwnerStat icon={UserCheck} label="Active" value={ownerLoading ? "—" : activeCount} tone="success" />
+                <OwnerStat icon={UserX} label="Inactive" value={ownerLoading ? "—" : inactiveCount} tone="warning" />
+                <OwnerStat icon={Shield} label="Roles" value={ownerLoading ? "—" : configuredRoles} tone="accent" />
               </div>
 
               <div className="nx-owner-cards">
                 <div className="nx-ledger-module">
                   <div className="nx-ledger-module-head">
                     <h3 className="nx-ledger-module-title">Branches</h3>
-                    <span className="nx-ledger-module-meta">{activeBranches || branches.length} active</span>
+                    <span className="nx-ledger-module-meta">{activeBranches || safeBranches.length} active</span>
                   </div>
-                  {branches.length === 0 ? (
+                  {safeBranches.length === 0 ? (
                     <div className="nx-dash-empty min-h-[80px]">No branches returned.</div>
                   ) : (
                     <div className="space-y-2">
-                      {branches.slice(0, 6).map((branch) => (
+                      {safeBranches.slice(0, 6).map((branch) => (
                         <div key={branch.id} className="flex items-center justify-between rounded-[8px] border border-app px-3 py-2 text-sm">
                           <span className="inline-flex items-center gap-2 font-medium">
                             <Building2 size={14} className="text-app-muted" aria-hidden />
@@ -531,6 +752,36 @@ export default function Dashboard() {
                       </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="nx-ledger-module">
+                  <div className="nx-ledger-module-head">
+                    <h3 className="nx-ledger-module-title">Payroll &amp; HR</h3>
+                    <Button type="button" variant="outline" size="sm" onClick={() => navigate("/payroll")}>
+                      Open
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <div className="text-app-muted">Active staff</div>
+                      <div className="mt-1 font-mono text-lg font-bold">{payrollDash?.active_employees ?? "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-app-muted">Pending leave</div>
+                      <div className="mt-1 font-mono text-lg font-bold">{payrollDash?.pending_leave ?? "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-app-muted">Latest net payroll</div>
+                      <div className="mt-1 font-mono text-lg font-bold">{money(payrollDash?.latest_run?.net_total || 0)}</div>
+                    </div>
+                    <div>
+                      <div className="text-app-muted">OT cost (latest)</div>
+                      <div className="mt-1 font-mono text-lg font-bold">{money(payrollDash?.overtime_cost_latest || 0)}</div>
+                    </div>
+                  </div>
+                  {!!payrollDash?.insights?.length && (
+                    <p className="mt-3 text-xs text-app-muted">{payrollDash.insights[0]}</p>
+                  )}
                 </div>
 
                 <div className="nx-ledger-module">
@@ -578,13 +829,13 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {(team.length > 0 || cashiers.length > 0) && (
+              {(safeTeam.length > 0 || safeCashiers.length > 0) && (
                 <div className="table-container mt-1">
                   <div className="border-b border-app px-4 py-3">
                     <h3 className="card-title">User activity &amp; cashier performance — today</h3>
                     <p className="mt-1 text-sm text-app-muted">
-                      {cashiers.length
-                        ? `Top cashier: ${cashiers[0].name} · Lowest cashier: ${cashiers[cashiers.length - 1].name}`
+                      {safeCashiers.length
+                        ? `Top cashier: ${safeCashiers[0].name} · Lowest cashier: ${safeCashiers[safeCashiers.length - 1].name}`
                         : "No cashier accounts available."}
                     </p>
                   </div>
@@ -598,19 +849,19 @@ export default function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {team.map((member, index) => (
-                          <tr key={member.id}>
+                        {safeTeam.map((member, index) => (
+                          <tr key={member?.id ?? index}>
                             <td className="font-mono text-sm">#{index + 1}</td>
                             <td>
-                              <div className="text-sm font-medium">{member.name}</div>
-                              <div className="text-xs text-app-muted">@{member.username}</div>
+                              <div className="text-sm font-medium">{member?.name}</div>
+                              <div className="text-xs text-app-muted">@{member?.username}</div>
                             </td>
-                            <td className={`text-xs font-semibold ${member.online ? "text-success" : "text-danger"}`}>
-                              {member.online ? "● Online" : "● Offline"}
+                            <td className={`text-xs font-semibold ${member?.online ? "text-success" : "text-danger"}`}>
+                              {member?.online ? "● Online" : "● Offline"}
                             </td>
-                            <td className="font-mono text-sm">{money(member.revenue)}</td>
-                            <td className="font-mono text-sm">{member.transactions}</td>
-                            <td className="font-mono text-sm text-success">{money(member.profit)}</td>
+                            <td className="font-mono text-sm">{money(member?.revenue)}</td>
+                            <td className="font-mono text-sm">{member?.transactions}</td>
+                            <td className="font-mono text-sm text-success">{money(member?.profit)}</td>
                           </tr>
                         ))}
                       </tbody>

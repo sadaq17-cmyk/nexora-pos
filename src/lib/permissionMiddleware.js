@@ -219,6 +219,7 @@ export const API_PERMISSION_MAP = {
   "sync.onConnectionRestored": ["settings", "edit", "result"],
 
   "permissions.getMatrix": ["roles", "view", "object"],
+  "permissions.saveMatrix": ["roles", "edit", "result"],
   "permissions.getMine": null,
   "permissions.update": ["roles", "edit", "result"],
   "permissions.createRole": ["roles", "create", "result"],

@@ -21,7 +21,7 @@ export default function PublicHeader() {
           <span className="nx-public-brand__mark" aria-hidden>
             <Store size={18} />
           </span>
-          <span className="nx-public-brand__name">Nexora POS</span>
+          <span className="nx-public-brand__name">Nexora POS Pro</span>
         </Link>
         <nav className="nx-public-nav" aria-label="Marketing">
           {NAV.map(([to, label]) => (

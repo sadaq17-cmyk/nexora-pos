@@ -16,6 +16,8 @@ import {
 } from "./_authHelpers.js";
 
 import { isValidEmailAddress } from "./_mailTransport.js";
+import { verifyEnrollmentTicket } from "./_otpService.js";
+import { normalizePhone } from "./_smsProvider.js";
 
 const validUsername = (value) => /^[a-z0-9][a-z0-9._-]{2,29}$/.test(value);
 const validEmail = (value) => isValidEmailAddress(value);
@@ -57,6 +59,53 @@ export default async function handler(req, res) {
       if (err?.code === "CONFIG") return jsonError(res, 503, err.message, "CONFIG");
       console.error("[admin-update-user] clear_must_change_password", err);
       return jsonError(res, 500, "Unable to clear password change flag.");
+    }
+  }
+
+  // Self-service: enable/disable SMS login verification. Enabling requires an
+  // enrollment_ticket proving the caller just verified that phone via OTP
+  // (see /api/send-email action=otp_verify, purpose=login).
+  if (body.action === "set_sms_login_otp") {
+    try {
+      const admin = createAdminClient();
+      const { data, error } = await admin.auth.admin.getUserById(caller.id);
+      if (error || !data?.user) return jsonError(res, 404, "User not found.");
+      const meta = data.user.app_metadata || {};
+      const enabled = Boolean(body.enabled);
+
+      let phone = meta.otp_phone || "";
+      if (enabled) {
+        const ticketCheck = verifyEnrollmentTicket(body.ticket);
+        if (!ticketCheck.valid || String(ticketCheck.userId) !== String(caller.id)) {
+          return jsonError(
+            res,
+            400,
+            ticketCheck.expired
+              ? "Verification expired. Please verify your phone again."
+              : "Verify your phone via SMS code before enabling this.",
+            ticketCheck.expired ? "TICKET_EXPIRED" : "TICKET_INVALID"
+          );
+        }
+        phone = ticketCheck.phone;
+      }
+
+      const { error: updateError } = await admin.auth.admin.updateUserById(caller.id, {
+        app_metadata: {
+          ...meta,
+          sms_login_otp_enabled: enabled,
+          otp_phone: enabled ? phone : meta.otp_phone,
+        },
+      });
+      if (updateError) return jsonError(res, 502, updateError.message || "Unable to update SMS login settings.");
+      return res.status(200).json({
+        success: true,
+        sms_login_otp_enabled: enabled,
+        otp_phone: enabled ? normalizePhone(phone) : null,
+      });
+    } catch (err) {
+      if (err?.code === "CONFIG") return jsonError(res, 503, err.message, "CONFIG");
+      console.error("[admin-update-user] set_sms_login_otp", err);
+      return jsonError(res, 500, "Unable to update SMS login settings.");
     }
   }
 
@@ -275,6 +324,30 @@ export default async function handler(req, res) {
       app_metadata.company_id = nextRole === "platform_owner" ? null : body.company_id;
     }
 
+    // A branch must exist and belong to the SAME company as the user being
+    // assigned to it — otherwise a user can silently end up scoped to
+    // another tenant's branch (or a branch that no longer exists).
+    if (app_metadata.branch_id != null && app_metadata.branch_id !== "") {
+      const { data: branchRow, error: branchLookupError } = await admin
+        .from("branches")
+        .select("id, company_id, active")
+        .eq("id", app_metadata.branch_id)
+        .maybeSingle();
+      if (branchLookupError) {
+        console.error("[admin-update-user] branch lookup failed", branchLookupError);
+        return jsonError(res, 502, "Unable to verify the selected branch. Please try again.", "BRANCH_LOOKUP_FAILED");
+      }
+      if (!branchRow) {
+        return jsonError(res, 400, "The selected branch does not exist.", "BRANCH_NOT_FOUND");
+      }
+      if (String(branchRow.company_id) !== String(app_metadata.company_id)) {
+        return jsonError(res, 400, "The selected branch does not belong to this user's company.", "BRANCH_COMPANY_MISMATCH");
+      }
+      if (branchRow.active === false) {
+        return jsonError(res, 400, "The selected branch is inactive.", "BRANCH_INACTIVE");
+      }
+    }
+
     const updates = {
       app_metadata,
       user_metadata: { ...(target.user_metadata || {}), name },
@@ -309,8 +382,22 @@ export default async function handler(req, res) {
       must_change_password: mustChangePassword,
     };
     const { error: profileError } = await admin.from("profiles").update(profilePayload).eq("id", id);
-    if (profileError && !/column|PGRST204/i.test(String(profileError.message || profileError.code || ""))) {
-      console.error("[admin-update-user] profiles sync", profileError);
+    if (profileError) {
+      const benign = /column|PGRST204/i.test(String(profileError.message || profileError.code || ""));
+      if (!benign) {
+        // Auth (app_metadata) was already updated above — if profiles fails to
+        // sync, the two stores drift (e.g. UI reading profiles.branch_id looks
+        // "stuck" on the old branch even though the JWT says otherwise).
+        // Surface this as a real failure instead of a silent 200 OK.
+        console.error("[admin-update-user] profiles sync failed", profileError);
+        return jsonError(
+          res,
+          502,
+          "The user's account was updated, but syncing their profile record failed. Please try again.",
+          "PROFILE_SYNC_FAILED"
+        );
+      }
+      console.warn("[admin-update-user] profiles sync skipped (optional column missing)", profileError.message || profileError.code);
     }
 
     return res.status(200).json({ success: true });

@@ -61,7 +61,7 @@ Catalog files:
 - `npm run build` — **green**
 - Production deploy — **ok**
   - Deployment: https://nexora-f97n5f37y-nexoraposapp.vercel.app
-  - Alias: https://www.httpsnexorapos.com
+  - Alias: https://www.nexorapospro.com
   - Inspect: https://vercel.com/nexoraposapp/nexora-pos/7MdtvVU6DQbgv6STRsEfJtocx1dC
 
 ## Notes / non-goals

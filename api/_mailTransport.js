@@ -20,7 +20,7 @@ function defaultFromAddress() {
   return (
     process.env.SMTP_FROM
     || process.env.MAIL_FROM
-    || "Nexora POS <noreply@httpsnexorapos.com>"
+    || "Nexora POS Pro <noreply@nexorapospro.com>"
   );
 }
 
@@ -32,7 +32,20 @@ function zohoSmtpConfigured() {
   );
 }
 
-async function sendViaZohoSmtp({ to, subject, html, text, replyTo }) {
+/** Normalizes {filename, base64, contentType} attachments to what each provider expects. */
+function normalizeAttachments(attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+  return attachments
+    .filter((a) => a && a.base64 && a.filename)
+    .slice(0, 5) // cap attachment count defensively
+    .map((a) => ({
+      filename: String(a.filename).slice(0, 150),
+      base64: String(a.base64),
+      contentType: a.contentType || "application/pdf",
+    }));
+}
+
+async function sendViaZohoSmtp({ to, subject, html, text, replyTo, attachments }) {
   const port = Number(process.env.SMTP_PORT || 465);
   const secure = String(process.env.SMTP_SECURE || (port === 465 ? "true" : "false")).toLowerCase() !== "false";
   const transporter = nodemailer.createTransport({
@@ -52,12 +65,17 @@ async function sendViaZohoSmtp({ to, subject, html, text, replyTo }) {
     html,
     text,
     replyTo: replyTo && isValidEmailAddress(replyTo) ? replyTo : undefined,
+    attachments: normalizeAttachments(attachments).map((a) => ({
+      filename: a.filename,
+      content: Buffer.from(a.base64, "base64"),
+      contentType: a.contentType,
+    })),
   });
 
   return { id: info.messageId || null, provider: "zoho_smtp" };
 }
 
-async function sendViaResend({ to, subject, html, text, replyTo }) {
+async function sendViaResend({ to, subject, html, text, replyTo, attachments }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     const err = new Error(
@@ -75,6 +93,10 @@ async function sendViaResend({ to, subject, html, text, replyTo }) {
     text,
   };
   if (replyTo && isValidEmailAddress(replyTo)) payload.reply_to = replyTo;
+  const normalizedAttachments = normalizeAttachments(attachments);
+  if (normalizedAttachments.length) {
+    payload.attachments = normalizedAttachments.map((a) => ({ filename: a.filename, content: a.base64 }));
+  }
   const { data, error } = await resend.emails.send(payload);
   if (error) {
     const err = new Error(error.message || "The email provider rejected the request.");
@@ -86,8 +108,9 @@ async function sendViaResend({ to, subject, html, text, replyTo }) {
 
 /**
  * Send transactional email. Prefers Zoho SMTP when configured.
+ * `attachments`: optional array of { filename, base64, contentType }.
  */
-export async function sendOutboundEmail({ to, subject, html, text, replyTo } = {}) {
+export async function sendOutboundEmail({ to, subject, html, text, replyTo, attachments } = {}) {
   const recipient = String(to || "").trim().toLowerCase();
   if (!isValidEmailAddress(recipient)) {
     const err = new Error("A valid recipient email address is required.");
@@ -95,10 +118,20 @@ export async function sendOutboundEmail({ to, subject, html, text, replyTo } = {
     throw err;
   }
 
-  if (zohoSmtpConfigured()) {
-    return sendViaZohoSmtp({ to: recipient, subject, html, text, replyTo });
+  try {
+    if (zohoSmtpConfigured()) {
+      return await sendViaZohoSmtp({ to: recipient, subject, html, text, replyTo, attachments });
+    }
+    return await sendViaResend({ to: recipient, subject, html, text, replyTo, attachments });
+  } catch (err) {
+    console.error("[mailTransport] send failed", {
+      to: recipient.replace(/(.{2}).+(@.+)/, "$1***$2"),
+      provider: mailProviderLabel(),
+      code: err?.code,
+      message: err?.message || String(err),
+    });
+    throw err;
   }
-  return sendViaResend({ to: recipient, subject, html, text, replyTo });
 }
 
 export function mailProviderLabel() {

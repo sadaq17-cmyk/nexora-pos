@@ -79,7 +79,7 @@ jobs:
         id: verify
         env:
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
-          CUSTOM_DOMAIN: https://www.httpsnexorapos.com
+          CUSTOM_DOMAIN: https://www.nexorapospro.com
         run: |
           set -euo pipefail
           BASE="${DEPLOY_URL%/}"
@@ -145,7 +145,7 @@ jobs:
             echo "| Timestamp (UTC) | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
             echo "| Job status | ${{ job.status }} |"
             echo "| Production URL | ${DEPLOY_URL:-n/a} |"
-            echo "| Custom domain | https://www.httpsnexorapos.com |"
+            echo "| Custom domain | https://www.nexorapospro.com |"
             echo "| Lint | must pass before deploy (blocked on failure) |"
             echo "| Build | must pass before deploy (blocked on failure) |"
             echo ""

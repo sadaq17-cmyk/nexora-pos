@@ -1,4 +1,4 @@
-/* Nexora POS — enterprise design system */
+/* Nexora POS Pro — enterprise design system */
 
 :root {
   color-scheme: light;
@@ -381,9 +381,11 @@ body {
   max-width: min(100%, 42rem);
 }
 
-/* Typography hierarchy */
-h1,
-.page-title {
+/* Typography hierarchy — scoped to the authenticated app + auth surfaces only.
+   `.nx-public-route` (set by PublicLayout) marks the marketing site, which
+   ships its own independent typography in public.css / nexora-pro-home.css. */
+body:not(.nx-public-route) h1,
+body:not(.nx-public-route) .page-title {
   color: var(--app-text);
   font-size: var(--text-page) !important;
   font-weight: 700;
@@ -395,8 +397,8 @@ h1,
   white-space: normal;
 }
 
-h2,
-.section-title {
+body:not(.nx-public-route) h2,
+body:not(.nx-public-route) .section-title {
   color: var(--app-text);
   font-size: var(--text-section) !important;
   font-weight: 700;
@@ -405,8 +407,8 @@ h2,
   margin: 0;
 }
 
-h3,
-.card-title {
+body:not(.nx-public-route) h3,
+body:not(.nx-public-route) .card-title {
   color: var(--app-text);
   font-size: var(--text-card);
   font-weight: 600;
@@ -415,7 +417,7 @@ h3,
   margin: 0;
 }
 
-p {
+body:not(.nx-public-route) p {
   font-size: var(--text-body);
   line-height: 1.65;
 }
@@ -430,8 +432,8 @@ p {
   line-height: 1.45 !important;
 }
 
-label,
-.form-label {
+body:not(.nx-public-route) label,
+body:not(.nx-public-route) .form-label {
   display: inline-block;
   color: var(--app-text);
   font-size: var(--text-label);
@@ -448,8 +450,9 @@ label,
   min-width: 0;
 }
 
-/* Cards */
-.card {
+/* Cards — app design system only; the marketing site uses its own
+   .npp-*-card / .nx-media-card family and never renders `.card`. */
+body:not(.nx-public-route) .card {
   border: 1px solid var(--app-border);
   border-radius: var(--radius);
   background: var(--app-panel);
@@ -458,18 +461,20 @@ label,
   transition: box-shadow var(--transition), border-color var(--transition), transform var(--duration-fast) var(--ease-out);
 }
 
-.card:hover {
+body:not(.nx-public-route) .card:hover {
   box-shadow: var(--shadow-card-hover);
 }
 
-.card .card-title,
-.card h3 {
+body:not(.nx-public-route) .card .card-title,
+body:not(.nx-public-route) .card h3 {
   font-size: var(--text-card);
   font-weight: 600;
 }
 
-/* Buttons */
-button,
+/* Buttons — base reset scoped to the app + auth surfaces; the marketing site
+   ships its own button styles (.nx-btn-primary, .nx-btn-secondary, etc.) in
+   public.css and must not inherit these. */
+body:not(.nx-public-route) button,
 .btn {
   border-radius: var(--radius-sm);
   font-family: inherit;
@@ -607,10 +612,12 @@ button.bg-brand:hover:not(:disabled) {
   to { transform: rotate(360deg); }
 }
 
-/* Forms — 48px controls */
-input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
-select,
-textarea,
+/* Forms — 48px controls. Scoped away from the marketing site (`.nx-public-route`),
+   which defines its own input/textarea styling for Contact/Support/newsletter
+   forms in public.css. */
+body:not(.nx-public-route) input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+body:not(.nx-public-route) select,
+body:not(.nx-public-route) textarea,
 .form-control {
   min-height: var(--control-height);
   border: 1px solid var(--app-border);
@@ -624,41 +631,41 @@ textarea,
   transition: border-color var(--transition), box-shadow var(--transition), background-color var(--transition);
 }
 
-textarea {
+body:not(.nx-public-route) textarea {
   min-height: 120px;
   padding-block: var(--space-1_5);
   line-height: 1.6;
 }
 
-input::placeholder,
-textarea::placeholder {
+body:not(.nx-public-route) input::placeholder,
+body:not(.nx-public-route) textarea::placeholder {
   color: var(--app-subtle);
   opacity: 1;
 }
 
-select option {
+body:not(.nx-public-route) select option {
   background: var(--app-panel);
   color: var(--app-text);
 }
 
-input:hover:not(:disabled):not(:focus),
-select:hover:not(:disabled):not(:focus),
-textarea:hover:not(:disabled):not(:focus) {
+body:not(.nx-public-route) input:hover:not(:disabled):not(:focus),
+body:not(.nx-public-route) select:hover:not(:disabled):not(:focus),
+body:not(.nx-public-route) textarea:hover:not(:disabled):not(:focus) {
   border-color: var(--app-border-strong);
 }
 
-input:focus,
-select:focus,
-textarea:focus,
+body:not(.nx-public-route) input:focus,
+body:not(.nx-public-route) select:focus,
+body:not(.nx-public-route) textarea:focus,
 .form-control:focus {
   border-color: var(--brand);
   box-shadow: 0 0 0 3px var(--focus-ring);
   outline: none;
 }
 
-input:invalid:not(:placeholder-shown):not(:focus),
-select:invalid:not(:focus),
-textarea:invalid:not(:placeholder-shown):not(:focus),
+body:not(.nx-public-route) input:invalid:not(:placeholder-shown):not(:focus),
+body:not(.nx-public-route) select:invalid:not(:focus),
+body:not(.nx-public-route) textarea:invalid:not(:placeholder-shown):not(:focus),
 .form-control.is-invalid {
   border-color: var(--danger);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 20%, transparent);
@@ -730,7 +737,7 @@ textarea:invalid:not(:placeholder-shown):not(:focus),
 }
 
 /* Tables */
-table,
+body:not(.nx-public-route) table,
 .data-table {
   width: 100%;
   border-collapse: separate;
@@ -1393,6 +1400,12 @@ tbody tr:last-child td { border-bottom: 0; }
   gap: 12px;
 }
 
+.nx-dash-kpi-row-wide {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
 .nx-dash-kpi {
   border: 1px solid var(--app-border);
   border-radius: var(--radius);
@@ -1815,6 +1828,20 @@ tbody tr:last-child td { border-bottom: 0; }
   color: var(--app-muted);
 }
 
+.nx-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.nx-quick-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 160px;
+  justify-content: center;
+}
+
 .nx-stock-table-wrap {
   overflow-x: auto;
 }
@@ -1889,6 +1916,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .nx-owner-stat.tone-muted { color: var(--app-muted); }
 .nx-owner-stat.tone-brand { color: var(--brand); }
 .nx-owner-stat.tone-accent { color: var(--accent); }
+.nx-owner-stat.tone-danger { color: var(--danger); }
 
 .nx-owner-stat-value {
   font-family: var(--font-mono);
@@ -3155,32 +3183,27 @@ svg { flex-shrink: 0; }
   color: var(--brand);
 }
 
-.nx-pos-total-row.is-pay {
-  padding-top: 4px;
-  font-size: 11px;
-}
-
 .nx-pay-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  padding: 0 12px 10px;
+  gap: 8px;
+  padding: 4px 12px 12px;
 }
 
 .nx-pay-btn {
   display: flex;
-  min-height: 44px;
+  min-height: 48px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
   border: 1px solid var(--app-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md, 10px);
   background: var(--app-panel);
   color: var(--app-text);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  transition: border-color var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out);
+  transition: border-color var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .nx-pay-btn:hover {
@@ -3192,6 +3215,7 @@ svg { flex-shrink: 0; }
   border-color: var(--brand);
   background: var(--brand-soft);
   color: var(--brand);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent);
 }
 
 .nx-receipt-tender {
@@ -3251,6 +3275,77 @@ svg { flex-shrink: 0; }
   letter-spacing: 0.01em;
   position: sticky;
   bottom: 0;
+}
+
+/* Checkout CTA — single large Complete Sale, Hold as quiet secondary */
+.nx-pos-checkout {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 14px;
+  background: var(--receipt-footer);
+}
+
+.nx-pos-hold-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  align-self: flex-start;
+  min-height: 34px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out);
+}
+
+.nx-pos-hold-btn:hover:not(:disabled) {
+  color: var(--app-text);
+  background: var(--app-panel-muted);
+}
+
+.nx-pos-hold-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.nx-pos-complete-btn {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-md, 10px);
+  background: var(--brand);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--brand) 35%, transparent);
+  transition: filter var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
+}
+
+.nx-pos-complete-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.nx-pos-complete-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.nx-pos-complete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .nx-osk {
@@ -3458,6 +3553,7 @@ svg { flex-shrink: 0; }
   .nx-pay-btn { min-height: 40px; font-size: 10px; }
   .nx-pos-actions .btn { min-height: 40px; font-size: 12px; }
   .nx-pos-actions .btn-primary { font-size: 13px; }
+  .nx-pos-complete-btn { min-height: 48px; font-size: 14px; }
   .nx-pos-total-row.is-grand { font-size: 12px; }
   .nx-pos-total-row.is-grand span:last-child { font-size: 14px; }
 }
@@ -3484,6 +3580,31 @@ svg { flex-shrink: 0; }
     height: auto;
     max-height: min(62vh, 560px);
     margin: 0 var(--space-1_5) var(--space-1_5);
+  }
+  .nx-pay-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 0 12px 12px;
+  }
+  .nx-pay-btn {
+    min-height: 48px;
+    font-size: 12px;
+  }
+  .nx-pos-checkout {
+    padding: 0 12px 16px;
+    gap: 10px;
+  }
+  .nx-pos-complete-btn {
+    min-height: 54px;
+    font-size: 16px;
+    border-radius: 12px;
+  }
+  .nx-receipt-tender {
+    padding: 0 12px 12px;
+  }
+  .nx-receipt-input {
+    min-height: 44px;
+    font-size: 16px; /* avoids iOS zoom */
   }
   .nx-osk {
     position: fixed;

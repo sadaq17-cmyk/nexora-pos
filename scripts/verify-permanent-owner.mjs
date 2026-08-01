@@ -1,6 +1,8 @@
 import { chromium } from "playwright";
+import { assertNotProduction } from "./_prodSafety.mjs";
 
-const BASE = "https://www.httpsnexorapos.com";
+const BASE = process.env.E2E_BASE_URL || "https://www.nexorapospro.com";
+assertNotProduction(BASE, { scriptName: "verify-permanent-owner.mjs" });
 const EMAIL = "owner.honest@nexorapos.demo";
 const PASSWORD = "Honest@2026";
 

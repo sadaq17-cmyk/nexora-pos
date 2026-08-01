@@ -6,7 +6,7 @@ export default function PublicFooter() {
     <footer className="nx-public-footer">
       <div className="nx-public-footer__inner">
         <div>
-          <div className="nx-public-footer__brand">Nexora POS</div>
+          <div className="nx-public-footer__brand">Nexora POS Pro</div>
           <p className="nx-public-footer__copy">
             Enterprise retail operations for growing multi-branch businesses.
           </p>
@@ -45,7 +45,7 @@ export default function PublicFooter() {
         </div>
       </div>
       <div className="nx-public-footer__bar">
-        © {new Date().getFullYear()} Nexora POS Enterprise
+        © {new Date().getFullYear()} Nexora POS Pro
       </div>
     </footer>
   );

@@ -1,7 +1,7 @@
 /**
- * Post-deploy live validation against www.httpsnexorapos.com
+ * Post-deploy live validation against www.nexorapospro.com
  */
-const origin = "https://www.httpsnexorapos.com";
+const origin = "https://www.nexorapospro.com";
 const routes = ["/", "/login", "/dashboard", "/pos", "/reports", "/inventory", "/purchases", "/settings", "/invoice/test"];
 const headersNeeded = [
   "strict-transport-security",

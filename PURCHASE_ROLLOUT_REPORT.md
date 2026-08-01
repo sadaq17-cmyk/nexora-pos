@@ -1,7 +1,7 @@
-﻿# Nexora POS — Purchase Workflow Production Rollout Report
+# Nexora POS — Purchase Workflow Production Rollout Report
 
 **Date:** 2026-07-20 (migrations applied via Supabase CLI)  
-**Production URL:** https://www.httpsnexorapos.com  
+**Production URL:** https://www.nexorapospro.com  
 **Supabase project:** `ohrpezhlnjwiilojdqbo` (linked)
 
 ---
@@ -23,7 +23,7 @@ Pending migrations were applied to the **linked Supabase Cloud** project with Su
 5. `supabase db push --linked --yes` — applied `006_remove_demo_products.sql` and `007_purchase_workflow_fields.sql`
 6. `supabase migration list --linked` — 001–007 local/remote in sync
 7. `supabase db query --linked` — verified `products.sku`, `products.tax_rate`, `suppliers.tax_number`, `suppliers.notes`
-8. `POST https://www.httpsnexorapos.com/api/pos` `{"action":"health.probe"}` with Origin header
+8. `POST https://www.nexorapospro.com/api/pos` `{"action":"health.probe"}` with Origin header
 
 No local Docker Supabase was started or used.
 
@@ -65,7 +65,7 @@ Cause: remote schema already had 001 objects, but `supabase_migrations.schema_mi
 
 ## Live health.probe (post-migration)
 
-`POST https://www.httpsnexorapos.com/api/pos` `{"action":"health.probe"}` → **success: true**
+`POST https://www.nexorapospro.com/api/pos` `{"action":"health.probe"}` → **success: true**
 
 Key checks:
 
@@ -87,7 +87,7 @@ All checks TRUE. No permission errors reported by the probe.
 | Apply 006/007 | **PASS** |
 | health.probe | **PASS** (all checks TRUE) |
 | `npx vercel --prod --yes` | **PASS** — `dpl_GXt8LJz9AicSi5gBVuk4fafdSUh7` READY |
-| Production alias | https://www.httpsnexorapos.com |
+| Production alias | https://www.nexorapospro.com |
 | Deployment URL | https://nexora-3g6l7gtdk-nexoraposapp.vercel.app |
 | Inspect | https://vercel.com/nexoraposapp/nexora-pos/GXt8LJz9AicSi5gBVuk4fafdSUh7 |
 

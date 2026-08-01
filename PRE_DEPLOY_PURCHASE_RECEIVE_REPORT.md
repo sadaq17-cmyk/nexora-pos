@@ -38,7 +38,7 @@ Interactive login / live POS UI smoke remain SKIP in `verify:production` (no cre
 |--------|--------|
 | Status | **READY** |
 | Deploy ID | `dpl_656rkc9wqAy7gKQRLpjBV7hr9Lxb` |
-| Alias | https://www.httpsnexorapos.com |
+| Alias | https://www.nexorapospro.com |
 | Inspect | https://vercel.com/nexoraposapp/nexora-pos/656rkc9wqAy7gKQRLpjBV7hr9Lxb |
 
 First `vercel --prod` attempt failed with network `fetch failed`; retry succeeded.

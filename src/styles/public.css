@@ -149,101 +149,14 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes public-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes public-slide-left {
-  from { opacity: 0; transform: translateX(28px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
 .public-animate-fade {
   animation: public-fade-up 0.7s ease both;
 }
 
-.public-animate-fade-delay {
-  animation: public-fade-up 0.75s ease 0.12s both;
-}
-
-.public-animate-slide {
-  animation: public-slide-left 0.85s ease 0.18s both;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .public-animate-fade,
-  .public-animate-fade-delay,
-  .public-animate-slide {
+  .public-animate-fade {
     animation: none;
   }
-}
-
-/* Hero — full-bleed visual plane */
-.nx-hero {
-  position: relative;
-  overflow: hidden;
-  min-height: min(92vh, 780px);
-  display: grid;
-  align-items: center;
-  background:
-    radial-gradient(ellipse 75% 55% at 82% 38%, rgb(37 99 235 / 0.38), transparent 58%),
-    radial-gradient(ellipse 45% 40% at 8% 70%, rgb(14 116 144 / 0.22), transparent 55%),
-    linear-gradient(125deg, #071225 0%, #0b1c3d 40%, #16356e 100%);
-  color: #fff;
-}
-
-.nx-hero__inner {
-  position: relative;
-  z-index: 2;
-  width: min(1120px, 100%);
-  margin: 0 auto;
-  padding: 4.5rem 1.25rem 5rem;
-  display: grid;
-  gap: 2rem;
-}
-
-@media (min-width: 1024px) {
-  .nx-hero__inner {
-    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
-    align-items: center;
-    padding-top: 5.5rem;
-    padding-bottom: 5.5rem;
-  }
-}
-
-.nx-hero__brand {
-  font-family: var(--font-display);
-  font-size: clamp(2.85rem, 6.5vw, 4.5rem);
-  font-weight: 700;
-  line-height: 1.05;
-  margin: 0;
-  color: #ffffff;
-}
-
-.nx-hero__headline {
-  margin: 1.1rem 0 0;
-  font-family: var(--font-sans);
-  font-size: clamp(1.15rem, 2.2vw, 1.45rem);
-  font-weight: 600;
-  line-height: 1.35;
-  max-width: 22ch;
-  color: #f8fafc;
-}
-
-.nx-hero__sub {
-  margin: 0.85rem 0 0;
-  max-width: 36ch;
-  font-size: 1rem;
-  line-height: 1.65;
-  color: rgba(226, 232, 240, 0.88);
-}
-
-.nx-hero__cta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 1.75rem;
 }
 
 .nx-btn-primary {
@@ -345,7 +258,6 @@
 .nx-section--soft > .nx-gallery,
 .nx-section--soft > .nx-media-grid,
 .nx-section--soft > .nx-spotlight-grid,
-.nx-section--soft > .nx-stats-grid,
 .nx-section--soft > .nx-empty-media,
 .nx-section--soft > .nx-faq,
 .nx-section--soft > a,
@@ -638,31 +550,6 @@
   color: var(--nexora-muted);
 }
 
-.nx-stats-grid {
-  margin-top: 2rem;
-  display: grid;
-  gap: 0.85rem;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-}
-
-.nx-stat {
-  background: var(--nexora-navy);
-  color: #fff;
-  border-radius: 1rem;
-  padding: 1.35rem 1.25rem;
-}
-
-.nx-stat__value {
-  font-size: 1.85rem;
-  font-weight: 700;
-}
-
-.nx-stat__label {
-  margin-top: 0.35rem;
-  font-size: 0.875rem;
-  color: rgba(226, 232, 240, 0.85);
-}
-
 .nx-public-footer {
   border-top: 1px solid rgb(11 28 61 / 0.08);
   background: color-mix(in srgb, var(--nexora-navy) 96%, #122a56);
@@ -739,24 +626,6 @@
 }
 
 /* Auth pages that still use marketing shell classes */
-.nx-auth-shell {
-  min-height: 100vh;
-  min-height: 100dvh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem 1rem;
-  background:
-    radial-gradient(ellipse 70% 55% at 12% 20%, rgb(37 99 235 / 0.28), transparent 55%),
-    radial-gradient(ellipse 55% 45% at 88% 78%, rgb(14 116 144 / 0.22), transparent 50%),
-    linear-gradient(145deg, #071225 0%, #0b1c3d 42%, #122a56 100%);
-}
-
-.nx-auth-shell .card,
-.nx-auth-shell [class*="rounded"] {
-  box-shadow: 0 16px 48px rgb(0 0 0 / 0.28);
-}
-
 @media (max-width: 1100px) {
   .nx-media-grid--industries,
   .nx-media-grid--action {

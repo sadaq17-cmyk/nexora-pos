@@ -60,35 +60,48 @@ export default function UserForm() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const branchRows = await api.branches.getAll();
-      setBranches(branchRows);
-      if (!editing) {
-        const companyScoped = isPlatformOwner(user?.role)
-          ? branchRows
-          : branchRows.filter((branch) => String(branch.company_id) === String(user?.company_id));
-        const defaultBranch = companyScoped[0] || branchRows[0];
-        setForm((current) => ({
-          ...current,
-          company_id: isPlatformOwner(user?.role) ? current.company_id : user?.company_id,
-          branch_id: defaultBranch?.id ?? current.branch_id,
-        }));
-        setLoading(false);
-        return;
+      try {
+        const branchRows = await api.branches.getAll();
+        if (cancelled) return;
+        setBranches(branchRows);
+        if (!editing) {
+          // Fail closed: a Platform Owner has no company of their own, so
+          // "all branches" is never a safe default — they must pick a
+          // company first. Never fall back to an arbitrary cross-tenant
+          // branch (that's how unrelated/E2E branches leaked into new-user
+          // defaults previously).
+          const companyScoped = isPlatformOwner(user?.role)
+            ? []
+            : branchRows.filter((branch) => String(branch.company_id) === String(user?.company_id));
+          const defaultBranch = companyScoped[0];
+          setForm((current) => ({
+            ...current,
+            company_id: isPlatformOwner(user?.role) ? current.company_id : user?.company_id,
+            branch_id: defaultBranch?.id ?? current.branch_id,
+          }));
+          return;
+        }
+        const existing = await api.auth.getUser(id);
+        if (cancelled) return;
+        if (existing) {
+          setForm({
+            ...EMPTY,
+            ...existing,
+            active: existing.active ? 1 : 0,
+            login_enabled: existing.login_enabled === false || existing.login_enabled === 0 ? 0 : 1,
+            must_change_password: existing.must_change_password ? 1 : 0,
+            account_status: existing.account_status || (existing.active ? "active" : "inactive"),
+          });
+        }
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[UserForm] load failed", err);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      const existing = await api.auth.getUser(id);
-      if (existing) {
-        setForm({
-          ...EMPTY,
-          ...existing,
-          active: existing.active ? 1 : 0,
-          login_enabled: existing.login_enabled === false || existing.login_enabled === 0 ? 0 : 1,
-          must_change_password: existing.must_change_password ? 1 : 0,
-          account_status: existing.account_status || (existing.active ? "active" : "inactive"),
-        });
-      }
-      setLoading(false);
     })();
+    return () => { cancelled = true; };
   }, [editing, id, user?.company_id, user?.role]);
 
   if (!isUserManagerRole(user?.role)) return <Navigate to="/users" replace />;
@@ -102,8 +115,11 @@ export default function UserForm() {
   }
   const availableRoles = assignableRoles(user?.role);
   const actorCompanyId = isPlatformOwner(user?.role) ? form.company_id : user?.company_id;
+  // Fail closed: never render every tenant's branches mixed together. If we
+  // don't yet know which company this user belongs to (e.g. Platform Owner
+  // hasn't picked a company yet), show no branches rather than all of them.
   const availableBranches = actorCompanyId == null || actorCompanyId === ""
-    ? branches
+    ? []
     : branches.filter((branch) => String(branch.company_id) === String(actorCompanyId));
 
   const field = (name, value) => {
@@ -136,7 +152,28 @@ export default function UserForm() {
       return;
     }
     showToast(editing ? "User updated" : "User created");
-    navigate("/users");
+    // Optimistic list refresh: pass created user so /users shows them immediately
+    const createdUser = !editing && (result.user || result.id)
+      ? {
+          id: result.user?.id || result.id,
+          name: payload.name,
+          username: payload.username,
+          email: payload.email,
+          phone: payload.phone,
+          role: payload.role,
+          branch_id: payload.branch_id,
+          company_id: payload.company_id,
+          active: payload.active,
+          account_status: payload.account_status || "active",
+          login_enabled: payload.login_enabled,
+          employee_id: payload.employee_id,
+          department: payload.department,
+          position: payload.position,
+          last_login_at: null,
+          branch_name: availableBranches.find((b) => String(b.id) === String(payload.branch_id))?.name || "",
+        }
+      : null;
+    navigate("/users", { state: createdUser ? { createdUser } : undefined, replace: true });
   };
 
   const choosePhoto = async (event) => {

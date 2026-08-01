@@ -12,7 +12,13 @@ import MfaSettingsPanel from "../components/MfaSettingsPanel";
 import LoginSecurityPanel from "../components/LoginSecurityPanel";
 import CurrenciesSettingsPanel from "../components/CurrenciesSettingsPanel";
 import { canAccessCurrencySettings, isOwner, isSuperAdmin } from "../lib/rbac";
-import { CURRENCIES, getCurrency } from "../lib/currency";
+import {
+  COUNTRIES,
+  CURRENCIES,
+  getCountry,
+  getCurrency,
+  getDefaultCurrencyForCountry,
+} from "../lib/currency";
 import { isPaymentMethodEnabled, PAYMENT_METHODS } from "../lib/paymentMethods";
 
 const BASE_TABS = [
@@ -40,9 +46,9 @@ const VALID_TABS = new Set([
   "backup",
 ]);
 
-function Field({ label, value, onChange, type = "text" }) {
+function Field({ label, value, onChange, type = "text", className = "" }) {
   return (
-    <div>
+    <div className={className}>
       <label className="mb-1.5 block text-xs font-medium text-app-text">{label}</label>
       <input
         type={type}
@@ -154,15 +160,20 @@ export default function Settings() {
   };
 
   const load = async () => {
-    const [s, sy, bh] = await Promise.all([
-      api.settings.getAll(),
-      api.sync.getStatus(),
-      api.backup.getHistory(),
-    ]);
-    setSettings(s);
-    setSyncStatus(sy);
-    setBackupHistory(bh);
-    setLoading(false);
+    try {
+      const [s, sy, bh] = await Promise.all([
+        api.settings.getAll(),
+        api.sync.getStatus(),
+        api.backup.getHistory(),
+      ]);
+      setSettings(s);
+      setSyncStatus(sy);
+      setBackupHistory(bh);
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[Settings] load failed", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -174,14 +185,28 @@ export default function Settings() {
   }, [tab]);
 
   const set = (key, value) => setSettings((s) => ({ ...s, [key]: value }));
+  const setMany = (patch) => setSettings((s) => ({ ...s, ...patch }));
 
   const saveSettings = async (keys) => {
     const updates = Object.fromEntries(keys.map((k) => [k, settings[k]]));
+    if (updates.currency || updates.currency_code) {
+      const currency = getCurrency(updates.currency_code || updates.currency);
+      updates.currency = currency.code;
+      updates.currency_code = currency.code;
+      updates.currency_symbol = currency.symbol;
+      updates.locale = updates.locale || currency.locale;
+      updates.base_currency_code = updates.base_currency_code || currency.code;
+    }
+    if (updates.country || updates.country_code) {
+      const country = getCountry(updates.country_code || updates.country);
+      updates.country = country.name;
+      updates.country_code = country.code;
+    }
     const result = await api.settings.update(updates);
     if (result.success) {
       const applied = { ...updates };
-      if (updates.currency) applied.currency_symbol = getCurrency(updates.currency).symbol;
       window.dispatchEvent(new CustomEvent("nexora:settings-updated", { detail: { settings: applied } }));
+      await load();
     }
     showToast(result.success ? "Settings saved" : result.error || "Could not save settings");
   };
@@ -270,13 +295,50 @@ export default function Settings() {
               <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Store Name" value={settings.store_name || ""} onChange={(v) => set("store_name", v)} />
                 <Field label="Phone Number" value={settings.store_phone || ""} onChange={(v) => set("store_phone", v)} />
-                <Field label="Address" value={settings.store_address || ""} onChange={(v) => set("store_address", v)} />
+                <Field label="Address" value={settings.store_address || ""} onChange={(v) => set("store_address", v)} className="sm:col-span-2" />
                 <div>
-                  <label className="mb-1.5 block text-xs font-medium text-app-text">Base currency (legacy)</label>
+                  <label className="mb-1.5 block text-xs font-medium text-app-text">Country</label>
                   <select
-                    disabled={!superAdmin}
-                    value={settings.currency || "KES"}
-                    onChange={(e) => set("currency", e.target.value)}
+                    disabled={!superAdmin && !companyOwner}
+                    value={settings.country_code || getCountry(settings.country || "Kenya").code}
+                    onChange={(e) => {
+                      const country = getCountry(e.target.value);
+                      const currency = getDefaultCurrencyForCountry(country.code);
+                      setMany({
+                        country: country.name,
+                        country_code: country.code,
+                        currency: currency.code,
+                        currency_code: currency.code,
+                        currency_symbol: currency.symbol,
+                        locale: currency.locale || country.locale,
+                        base_currency_code: currency.code,
+                        report_currency: settings.report_currency || currency.code,
+                      });
+                    }}
+                    className="w-full rounded-control border border-app bg-app-panel px-3 py-2 text-sm disabled:opacity-60"
+                  >
+                    {COUNTRIES.map((country) => (
+                      <option key={country.code} value={country.code}>
+                        {country.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-app-text">Currency</label>
+                  <select
+                    disabled={!superAdmin && !companyOwner}
+                    value={settings.currency_code || settings.currency || "KES"}
+                    onChange={(e) => {
+                      const currency = getCurrency(e.target.value);
+                      setMany({
+                        currency: currency.code,
+                        currency_code: currency.code,
+                        currency_symbol: currency.symbol,
+                        locale: currency.locale || settings.locale,
+                        base_currency_code: currency.code,
+                      });
+                    }}
                     className="w-full rounded-control border border-app bg-app-panel px-3 py-2 text-sm disabled:opacity-60"
                   >
                     {CURRENCIES.map((currency) => (
@@ -285,17 +347,20 @@ export default function Settings() {
                       </option>
                     ))}
                   </select>
+                  <p className="mt-1 text-[11px] text-app-muted">
+                    Changes display formatting only. Historical amounts are not converted.
+                  </p>
                   {currencyAccess && (
                     <p className="mt-1 text-[11px] text-app-muted">
                       Prefer{" "}
                       <button type="button" className="text-brand underline" onClick={() => selectTab("currencies")}>
                         Currencies
                       </button>{" "}
-                      for base currency, rates, and multi-currency policy.
+                      for FX rates and multi-currency policy.
                     </p>
                   )}
-                  {!superAdmin && !currencyAccess && (
-                    <p className="mt-1 text-[11px] text-app-muted">Only Owner can change base currency.</p>
+                  {!superAdmin && !companyOwner && (
+                    <p className="mt-1 text-[11px] text-app-muted">Only Owner can change country or currency.</p>
                   )}
                 </div>
               </div>
@@ -303,8 +368,20 @@ export default function Settings() {
                 type="button"
                 onClick={() =>
                   saveSettings(
-                    superAdmin
-                      ? ["store_name", "store_phone", "store_address", "currency"]
+                    superAdmin || companyOwner
+                      ? [
+                          "store_name",
+                          "store_phone",
+                          "store_address",
+                          "country",
+                          "country_code",
+                          "currency",
+                          "currency_code",
+                          "currency_symbol",
+                          "locale",
+                          "base_currency_code",
+                          "report_currency",
+                        ]
                       : ["store_name", "store_phone", "store_address"]
                   )
                 }

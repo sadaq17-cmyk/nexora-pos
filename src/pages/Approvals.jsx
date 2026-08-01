@@ -31,13 +31,20 @@ export default function Approvals() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [rows, typeRows] = await Promise.all([
-      api.approvals.list(),
-      api.approvals.listTypes(),
-    ]);
-    setRequests(Array.isArray(rows) ? rows : []);
-    setTypes(Array.isArray(typeRows) ? typeRows : []);
-    setLoading(false);
+    try {
+      const [rows, typeRows] = await Promise.all([
+        api.approvals.list(),
+        api.approvals.listTypes(),
+      ]);
+      setRequests(Array.isArray(rows) ? rows : []);
+      setTypes(Array.isArray(typeRows) ? typeRows : []);
+    } catch (err) {
+      if (import.meta.env.DEV) console.error("[Approvals] load failed", err);
+      setRequests([]);
+      setTypes([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);

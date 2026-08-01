@@ -1,10 +1,12 @@
 /**
- * Full production E2E against https://www.httpsnexorapos.com
+ * Full production E2E against https://www.nexorapospro.com
  * Assumes Playwright is already installed (skips availability checks).
  */
 import { chromium } from "playwright";
+import { assertNotProduction } from "./_prodSafety.mjs";
 
-const BASE = process.env.E2E_BASE_URL || "https://www.httpsnexorapos.com";
+const BASE = process.env.E2E_BASE_URL || "https://www.nexorapospro.com";
+assertNotProduction(BASE, { scriptName: "e2e-production-full.mjs" });
 const EMAIL = process.env.E2E_EMAIL || "qa.signup.0718b@gmail.com";
 const PASSWORD = process.env.E2E_PASSWORD || "QaSignup0718!";
 const CASHIER_EMAIL = `qa.cashier.${Date.now()}@gmail.com`;
@@ -267,7 +269,7 @@ try {
 
 // Prior verified items from this conversation (deploy/infra), included for the final matrix
 const infra = [
-  { name: "Production deploy (service role)", status: "PASS", detail: "Aliased to www.httpsnexorapos.com" },
+  { name: "Production deploy (service role)", status: "PASS", detail: "Aliased to www.nexorapospro.com" },
   { name: "Service role API (bootstrap)", status: "PASS", detail: "Admin getUser / enrich works" },
   { name: "Temp e2e-provision API removed", status: "PASS", detail: "404" },
 ];

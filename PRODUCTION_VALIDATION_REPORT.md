@@ -1,7 +1,7 @@
 # Nexora POS Enterprise — Final Production Validation Report
 
 **Date:** 2026-07-20 (post invoice-API fix)  
-**Production URL:** https://www.httpsnexorapos.com  
+**Production URL:** https://www.nexorapospro.com  
 **Deployment:** https://nexora-kx04et1k3-nexoraposapp.vercel.app  
 **Inspector:** https://vercel.com/nexoraposapp/nexora-pos/Do9wAqLZwgxC192wG6krjMbKc22y
 
@@ -34,7 +34,7 @@
 | Check | Result |
 |-------|--------|
 | Production deploy | PASS (`dpl_Do9wAqLZwgxC192wG6krjMbKc22y`) |
-| Alias www.httpsnexorapos.com | PASS |
+| Alias www.nexorapospro.com | PASS |
 | SPA routes HTTP 200 | PASS (`/`, `/login`, `/pos`, `/dashboard`, `/reports`, `/inventory`, `/purchases`, `/settings`, `/invoice/test`) |
 | Security headers (6/6) | PASS |
 | Latest enterprise assets | PASS (`index-DtiENO4a.js`, skip-link, content-max) |

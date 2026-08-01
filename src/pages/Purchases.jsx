@@ -12,6 +12,7 @@ import { api, isProductionDataPlane } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import ProductSelector from "../components/ProductSelector";
 import CurrencyMoneyFields from "../components/CurrencyMoneyFields";
 import { excludeDemoProducts } from "../lib/demoProducts";
@@ -24,15 +25,17 @@ const statusColors = {
   Draft: ["#6B7690", "#F1F3F8"],
   Pending: ["#D97706", "#FEF3E2"],
   Ordered: ["#2563EB", "#EEF3FF"],
+  Approved: ["#2563EB", "#EEF3FF"],
   PartiallyReceived: ["#7C3AED", "#F3E8FF"],
   Received: ["#12A150", "#E8FAEF"],
   Cancelled: ["#DC2626", "#FEF2F2"],
   Rejected: ["#9F1239", "#FFE4E6"],
 };
 
-/** UI labels aligned to DB enums — "Approved" maps to Ordered. */
+/** UI labels — Pending = Pending Approval; Ordered legacy = Approved. */
 function statusLabel(status) {
-  if (status === "Ordered") return "Approved / Ordered";
+  if (status === "Pending") return "Pending Approval";
+  if (status === "Ordered" || status === "Approved") return "Approved";
   if (status === "PartiallyReceived") return "Partial / Back Order";
   if (status === "Rejected") return "Rejected";
   return status || "—";
@@ -101,7 +104,7 @@ async function exportPurchasesPdf(rows, money) {
   const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ orientation: "landscape" });
   doc.setFontSize(14);
-  doc.text("Nexora POS — Purchase Orders", 14, 16);
+  doc.text("Nexora POS Pro — Purchase Orders", 14, 16);
   doc.setFontSize(9);
   let y = 26;
   doc.text("PO | Supplier | Status | Total | Balance", 14, y);
@@ -118,19 +121,25 @@ async function exportPurchasesPdf(rows, money) {
   doc.save(`purchases-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]
+  ));
+}
+
 function printPaymentReceipt(po, payment, money) {
   const win = window.open("", "_blank", "noopener,noreferrer,width=480,height=640");
   if (!win) return;
-  win.document.write(`<!doctype html><html><head><title>Receipt ${po.po_number}</title>
+  win.document.write(`<!doctype html><html><head><title>Receipt ${escapeHtml(po.po_number)}</title>
     <style>body{font-family:Segoe UI,Arial,sans-serif;padding:24px;color:#1B2439}
     h1{font-size:18px;margin:0 0 8px}.muted{color:#6B7690;font-size:12px}
     .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #E5E8F0;font-size:13px}</style></head><body>
     <h1>Supplier Payment Receipt</h1>
-    <div class="muted">PO ${po.po_number} · ${String(payment.created_at || payment.payment_date || "").slice(0, 10)}</div>
-    <div class="row"><span>Supplier</span><strong>${po.supplier || "—"}</strong></div>
-    <div class="row"><span>Method</span><strong>${payment.method || "—"}</strong></div>
-    <div class="row"><span>Reference</span><strong>${payment.reference || "—"}</strong></div>
-    <div class="row"><span>Amount</span><strong>${money(payment.amount)}</strong></div>
+    <div class="muted">PO ${escapeHtml(po.po_number)} · ${escapeHtml(String(payment.created_at || payment.payment_date || "").slice(0, 10))}</div>
+    <div class="row"><span>Supplier</span><strong>${escapeHtml(po.supplier || "—")}</strong></div>
+    <div class="row"><span>Method</span><strong>${escapeHtml(payment.method || "—")}</strong></div>
+    <div class="row"><span>Reference</span><strong>${escapeHtml(payment.reference || "—")}</strong></div>
+    <div class="row"><span>Amount</span><strong>${escapeHtml(money(payment.amount))}</strong></div>
     <script>window.onload=()=>window.print()</script></body></html>`);
   win.document.close();
 }
@@ -139,6 +148,7 @@ const emptyLine = () => ({
   product_id: "",
   qty: 1,
   cost: "",
+  price: "",
   discount: "0",
   tax: "0",
 });
@@ -239,14 +249,14 @@ function printPurchaseOrder(po, items, money, supplier = null) {
     .map(
       (it) =>
         `<tr>
-          <td>${it.product_name || it.name || `#${it.product_id}`}</td>
-          <td style="text-align:right">${Number(it.qty_ordered ?? it.qty) || 0}</td>
-          <td style="text-align:right">${money(it.cost)}</td>
-          <td style="text-align:right">${money((Number(it.qty_ordered ?? it.qty) || 0) * (Number(it.cost) || 0))}</td>
+          <td>${escapeHtml(it.product_name || it.name || `#${it.product_id}`)}</td>
+          <td style="text-align:right">${escapeHtml(Number(it.qty_ordered ?? it.qty) || 0)}</td>
+          <td style="text-align:right">${escapeHtml(money(it.cost))}</td>
+          <td style="text-align:right">${escapeHtml(money((Number(it.qty_ordered ?? it.qty) || 0) * (Number(it.cost) || 0)))}</td>
         </tr>`
     )
     .join("");
-  win.document.write(`<!doctype html><html><head><title>PO ${po.po_number}</title>
+  win.document.write(`<!doctype html><html><head><title>PO ${escapeHtml(po.po_number)}</title>
     <style>
       body{font-family:Segoe UI,Arial,sans-serif;padding:24px;color:#1B2439}
       h1{font-size:20px;margin:0 0 4px}.muted{color:#6B7690;font-size:12px}
@@ -255,13 +265,13 @@ function printPurchaseOrder(po, items, money, supplier = null) {
       th{background:#F5F7FB;text-transform:uppercase;font-size:10px}
       .meta{margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px}
     </style></head><body>
-    <h1>Purchase Order ${po.po_number}</h1>
-    <div class="muted">Status: ${statusLabel(po.status)} · ${String(po.created_at || "").slice(0, 10)}</div>
+    <h1>Purchase Order ${escapeHtml(po.po_number)}</h1>
+    <div class="muted">Status: ${escapeHtml(statusLabel(po.status))} · ${escapeHtml(String(po.created_at || "").slice(0, 10))}</div>
     <div class="meta">
-      <div><strong>Supplier</strong><br>${supplier?.name || po.supplier || "—"}<br>${supplier?.email || ""}<br>${supplier?.phone || ""}</div>
-      <div><strong>Totals</strong><br>Total: ${money(po.total)}<br>Paid: ${money(po.amount_paid || 0)}<br>Balance: ${money(po.balance ?? Math.max(0, Number(po.total) - Number(po.amount_paid || 0)))}</div>
+      <div><strong>Supplier</strong><br>${escapeHtml(supplier?.name || po.supplier || "—")}<br>${escapeHtml(supplier?.email || "")}<br>${escapeHtml(supplier?.phone || "")}</div>
+      <div><strong>Totals</strong><br>Total: ${escapeHtml(money(po.total))}<br>Paid: ${escapeHtml(money(po.amount_paid || 0))}<br>Balance: ${escapeHtml(money(po.balance ?? Math.max(0, Number(po.total) - Number(po.amount_paid || 0))))}</div>
     </div>
-    ${po.notes ? `<p class="muted">Notes: ${po.notes}</p>` : ""}
+    ${po.notes ? `<p class="muted">Notes: ${escapeHtml(po.notes)}</p>` : ""}
     <table><thead><tr><th>Item</th><th>Qty</th><th>Cost</th><th>Line</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="4">No lines</td></tr>'}</tbody></table>
     <script>window.onload=()=>{window.print();}</script>
@@ -282,7 +292,7 @@ function emailPurchaseOrder(po, supplier = null) {
       po.notes ? `Notes: ${po.notes}` : "",
       "",
       "Regards,",
-      "Nexora POS",
+      "Nexora POS Pro",
     ]
       .filter(Boolean)
       .join("\n")
@@ -424,6 +434,14 @@ function NewProductDialog({ open, onClose, onCreated, categories, brands, units,
       showToast("Product name is required");
       return;
     }
+    if (form.cost === "" || parseFloat(form.cost) < 0) {
+      showToast("Cost Price is required and cannot be negative");
+      return;
+    }
+    if (form.price === "" || parseFloat(form.price) <= 0) {
+      showToast("Selling Price is required and must be greater than zero");
+      return;
+    }
     const purchaseQty = Math.max(1, parseInt(form.initial_qty, 10) || 1);
     const selectedUnit = units.find((u) => Number(u.id) === Number(form.unit_id));
     setSaving(true);
@@ -463,6 +481,7 @@ function NewProductDialog({ open, onClose, onCreated, categories, brands, units,
         product,
         qty: purchaseQty,
         cost: parseFloat(form.cost) || 0,
+        price: parseFloat(form.price) || 0,
         tax: parseFloat(form.tax_rate) || 0,
       });
       onClose();
@@ -521,8 +540,8 @@ function NewProductDialog({ open, onClose, onCreated, categories, brands, units,
           <Field label={`Purchase Price (${currency.symbol})`} required>
             <input required type="number" step="0.01" min="0" value={form.cost} onChange={set("cost")} className="form-control w-full" disabled={saving} />
           </Field>
-          <Field label={`Selling Price (${currency.symbol})`}>
-            <input type="number" step="0.01" min="0" value={form.price} onChange={set("price")} className="form-control w-full" disabled={saving} />
+          <Field label={`Selling Price (${currency.symbol})`} required>
+            <input required type="number" step="0.01" min="0.01" value={form.price} onChange={set("price")} className="form-control w-full" disabled={saving} />
           </Field>
           <Field label="Initial Purchase Qty" required>
             <input required type="number" min="1" value={form.initial_qty} onChange={set("initial_qty")} className="form-control w-full" disabled={saving} />
@@ -666,6 +685,10 @@ export default function Purchases() {
 
   useEffect(() => { load(); }, []);
 
+  // ERP real-time: suppliers, receiving, and product changes affect this
+  // workspace — refresh automatically instead of requiring a manual reload.
+  useRealtimeRefresh(["purchases", "suppliers", "products", "inventory"], load, { debounceMs: 1000 });
+
   const openCreate = (presetSupplierId = "") => {
     setEditingId(null);
     setSupplierId(presetSupplierId ? String(presetSupplierId) : "");
@@ -742,6 +765,7 @@ export default function Purchases() {
     updateLine(index, {
       product_id: productId,
       cost: product?.cost != null && product.cost !== "" ? String(product.cost) : "",
+      price: product?.price != null && product.price !== "" ? String(product.price) : "",
       tax: product?.tax_rate != null ? String(product.tax_rate) : lines[index]?.tax || "0",
     });
   };
@@ -756,7 +780,7 @@ export default function Purchases() {
     setSupplierId(String(supplier.id));
   };
 
-  const handleProductCreated = ({ product, qty, cost, tax }) => {
+  const handleProductCreated = ({ product, qty, cost, price, tax }) => {
     setProducts((list) => {
       if (list.some((p) => Number(p.id) === Number(product.id))) {
         return list.map((p) => (Number(p.id) === Number(product.id) ? { ...p, ...product } : p));
@@ -769,6 +793,7 @@ export default function Purchases() {
       product_id: String(product.id),
       qty,
       cost: String(cost ?? product.cost ?? ""),
+      price: String(price ?? product.price ?? ""),
       tax: String(tax ?? product.tax_rate ?? 0),
       discount: "0",
     });
@@ -793,6 +818,9 @@ export default function Purchases() {
         product_id: Number(l.product_id),
         qty: Number(l.qty),
         cost: parseFloat(l.cost) || 0,
+        // Selling price is optional per line — only sent when the buyer overrides it,
+        // so purchasing never silently changes a product's price by omission.
+        ...(l.price !== "" && l.price != null ? { price: parseFloat(l.price) || 0 } : {}),
         discount: parseFloat(l.discount) || 0,
         tax: parseFloat(l.tax) || 0,
       }));
@@ -886,8 +914,8 @@ export default function Purchases() {
   };
 
   const openEdit = async (po) => {
-    if (!["Draft", "Pending", "Ordered"].includes(po.status)) {
-      showToast("Only Draft / Pending / Approved POs can be edited");
+    if (!["Draft", "Pending"].includes(po.status)) {
+      showToast("Only Draft / Pending Approval POs can be edited");
       return;
     }
     const items = await api.purchases.getItems(po.id);
@@ -899,7 +927,7 @@ export default function Purchases() {
     setNotes(po.notes || "");
     setAttachmentUrl(po.attachment_url || "");
     setAmountPaidOnCreate("");
-    setCreateStatus(po.status === "Ordered" ? "Ordered" : po.status || "Pending");
+    setCreateStatus(po.status || "Pending");
     setBranchId(po.branch_id ? String(po.branch_id) : "");
     setWarehouseId(po.warehouse_id ? String(po.warehouse_id) : "");
     setDiscountTotal(String(po.discount_total ?? 0));
@@ -911,6 +939,7 @@ export default function Purchases() {
             product_id: String(it.product_id),
             qty: it.qty_ordered ?? it.qty ?? 1,
             cost: String(it.cost ?? ""),
+            price: it.price != null ? String(it.price) : "",
             discount: String(it.discount ?? 0),
             tax: String(it.tax ?? 0),
           }))
@@ -1056,11 +1085,12 @@ export default function Purchases() {
   };
 
   const markOrdered = async (po) => {
-    const result = await api.purchases.updateStatus(po.id, "Ordered");
+    const approveFn = api.purchases.approve || ((id) => api.purchases.updateStatus(id, "Approved"));
+    const result = await approveFn(po.id);
     if (result?.success) {
-      showToast(`${po.po_number} marked Approved / Ordered`);
+      showToast(`${po.po_number} approved — stock, cost, and supplier balance updated`);
       await load();
-    } else showToast(result?.error || "Could not update status");
+    } else showToast(result?.error || "Could not approve purchase");
   };
 
   const rejectPurchase = async (po) => {
@@ -1125,24 +1155,24 @@ export default function Purchases() {
 
   const canReceive = (po) =>
     can("purchases", "approve") &&
-    !["Received", "Cancelled", "Draft", "Rejected"].includes(po.status);
+    ["Approved", "Ordered", "PartiallyReceived"].includes(po.status);
 
   const canPay = (po) =>
     can("purchases", "edit") &&
-    !["Cancelled", "Draft", "Rejected"].includes(po.status) &&
+    ["Approved", "Ordered", "Received", "PartiallyReceived"].includes(po.status) &&
     Number(po.balance ?? Number(po.total) - Number(po.amount_paid || 0)) > 0;
 
   const canCancel = (po) =>
     can("purchases", "edit") &&
-    ["Draft", "Pending", "Ordered"].includes(po.status);
+    ["Draft", "Pending"].includes(po.status);
 
   const canReject = (po) =>
     can("purchases", "edit") &&
-    ["Draft", "Pending", "Ordered"].includes(po.status);
+    ["Draft", "Pending"].includes(po.status);
 
   const kpi = {
     total: dashboard?.total_purchases ?? purchases.filter((p) => !["Cancelled", "Rejected"].includes(p.status)).length,
-    pending: dashboard?.pending_pos ?? purchases.filter((p) => ["Draft", "Pending", "Ordered"].includes(p.status)).length,
+    pending: dashboard?.pending_pos ?? purchases.filter((p) => ["Draft", "Pending"].includes(p.status)).length,
     received: dashboard?.received_orders ?? purchases.filter((p) => ["Received", "PartiallyReceived"].includes(p.status)).length,
     outstanding: dashboard?.outstanding_balance ?? purchases.reduce((s, p) => s + Math.max(0, Number(p.balance) || 0), 0),
     today: dashboard?.purchase_value_today ?? 0,
@@ -1481,7 +1511,7 @@ export default function Purchases() {
           />
         </div>
         <div className="flex flex-wrap gap-2">
-          {["all", "Draft", "Pending", "Ordered", "PartiallyReceived", "Received", "Rejected", "Cancelled"].map((s) => (
+          {["all", "Draft", "Pending", "Approved", "Ordered", "PartiallyReceived", "Received", "Rejected", "Cancelled"].map((s) => (
             <button
               key={s}
               type="button"
@@ -1534,7 +1564,7 @@ export default function Purchases() {
                         <button type="button" onClick={() => openDetail(po)} className="flex items-center gap-1 text-xs font-medium text-brand hover:underline">
                           <Eye size={12} /> View
                         </button>
-                        {["Draft", "Pending", "Ordered"].includes(po.status) && can("purchases", "edit") && (
+                        {["Draft", "Pending"].includes(po.status) && can("purchases", "edit") && (
                           <button type="button" onClick={() => openEdit(po)} className="text-xs font-medium text-app-text hover:underline">Edit</button>
                         )}
                         {can("purchases", "create") && (
@@ -1545,7 +1575,7 @@ export default function Purchases() {
                         {po.status === "Draft" && can("purchases", "edit") && (
                           <button type="button" onClick={() => submitDraft(po)} className="text-xs font-medium text-brand hover:underline">Submit</button>
                         )}
-                        {po.status === "Pending" && can("purchases", "edit") && (
+                        {po.status === "Pending" && (can("purchases", "approve") || can("purchases", "edit")) && (
                           <button type="button" onClick={() => markOrdered(po)} className="text-xs font-medium text-brand hover:underline">Approve</button>
                         )}
                         {canReject(po) && (
@@ -1666,8 +1696,8 @@ export default function Purchases() {
                 <Field label="Status">
                   <select value={createStatus} onChange={(e) => setCreateStatus(e.target.value)} className="form-control w-full" disabled={savingPo || !!editingId}>
                     <option value="Draft">Draft</option>
-                    <option value="Pending">Pending (submit for approval)</option>
-                    <option value="Ordered">Approved / Ordered</option>
+                    <option value="Pending">Pending Approval</option>
+                    <option value="Approved">Approved (posts stock & AP)</option>
                   </select>
                 </Field>
               </div>
@@ -1680,13 +1710,14 @@ export default function Purchases() {
                     ))}
                   </select>
                 </Field>
-                <Field label="Warehouse (receive into)">
-                  <select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)} className="form-control w-full" disabled={savingPo}>
-                    <option value="">Optional</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>{w.name}{w.code ? ` (${w.code})` : ""}</option>
-                    ))}
-                  </select>
+                <Field label="Receiving warehouse">
+                  <div className="form-control w-full flex items-center justify-between bg-app-panel-muted text-app-muted">
+                    <span>{warehouses.find((w) => w.is_main)?.name || "Main Store"}</span>
+                    <span className="text-xs">Fixed — enterprise rule</span>
+                  </div>
+                  <p className="mt-1 text-xs text-app-muted">
+                    Approved purchases always receive into the Main Store. Move stock to other warehouses via Stock Transfer.
+                  </p>
                 </Field>
               </div>
               <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -1772,17 +1803,20 @@ export default function Purchases() {
                           </button>
                         )}
                       </div>
-                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
                         <Field label="Qty">
                           <input type="number" min={1} value={line.qty} onChange={(e) => updateLine(i, { qty: e.target.value })} className="form-control w-full" disabled={savingPo} />
                         </Field>
-                        <Field label={`Price (${currency.symbol})`}>
+                        <Field label={`Cost price (${currency.symbol})`}>
                           <input type="number" step="0.01" min="0" value={line.cost} onChange={(e) => updateLine(i, { cost: e.target.value })} className="form-control w-full" disabled={savingPo} />
+                        </Field>
+                        <Field label={`Selling price (${currency.symbol})`}>
+                          <input type="number" step="0.01" min="0" value={line.price} onChange={(e) => updateLine(i, { price: e.target.value })} className="form-control w-full" placeholder="Keep current" disabled={savingPo} />
                         </Field>
                         <Field label={`Discount (${currency.symbol})`}>
                           <input type="number" step="0.01" min="0" value={line.discount} onChange={(e) => updateLine(i, { discount: e.target.value })} className="form-control w-full" disabled={savingPo} />
                         </Field>
-                        <Field label="Tax (%)">
+                        <Field label="VAT (%)">
                           <input type="number" step="0.01" min="0" value={line.tax} onChange={(e) => updateLine(i, { tax: e.target.value })} className="form-control w-full" disabled={savingPo} />
                         </Field>
                         <Field label="Line total">
@@ -1818,8 +1852,8 @@ export default function Purchases() {
                   ? "Saving…"
                   : editingId
                     ? "Save Changes"
-                    : createStatus === "Ordered"
-                      ? "Create as Approved / Ordered"
+                    : createStatus === "Approved"
+                      ? "Create & Approve (posts stock & AP)"
                       : "Create Purchase Order"}
               </button>
             </div>

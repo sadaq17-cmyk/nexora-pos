@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -37,10 +37,11 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { useTheme } from "../context/ThemeContext";
 import { api } from "../lib/api";
 import { isOwner, isPlatformOwner, roleLabel } from "../lib/rbac";
-import NexoraAiAssistant, { NexoraAiNavButton } from "./ai/NexoraAiAssistant";
+
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+
+const AiBundle = lazy(() => import("./ai/NexoraAiAssistant"));
+const AiNavButton = lazy(() =>
+  import("./ai/NexoraAiAssistant").then((m) => ({ default: m.NexoraAiNavButton }))
+);
 
 const SIDEBAR_KEY = "nexora_sidebar_collapsed";
 
@@ -194,8 +200,17 @@ function NavSections({ sections, collapsed, navIsActive, onNavigate }) {
   ));
 }
 
+function AiNavButtonLazy({ onClick }) {
+  return (
+    <Suspense fallback={null}>
+      <AiNavButton onClick={onClick} />
+    </Suspense>
+  );
+}
+
 export default function Layout() {
   const { user, logout, can, impersonation, stopImpersonation } = useAuth();
+  const { settings } = useEnterpriseSettings();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -208,7 +223,6 @@ export default function Layout() {
       return false;
     }
   });
-  const [settings, setSettings] = useState({});
   const [branches, setBranches] = useState([]);
   const [headerSearch, setHeaderSearch] = useState("");
   const [notifications, setNotifications] = useState({ items: [], unread: 0 });
@@ -237,24 +251,22 @@ export default function Layout() {
   }, [can, platformMode, companyOwner]);
 
   useEffect(() => {
-    if (!platformMode) {
-      api.settings.getAll()
-        .then((row) => {
-          if (row && typeof row === "object" && row.success !== false) setSettings(row);
-        })
-        .catch(() => null);
-      api.branches?.getAll?.()
-        .then((rows) => {
-          if (Array.isArray(rows)) setBranches(rows);
-        })
-        .catch(() => null);
-      api.notifications?.list?.()
-        .then((result) => {
-          if (result?.items) setNotifications({ items: result.items, unread: result.unread || result.items.length });
-          else if (Array.isArray(result)) setNotifications({ items: result, unread: result.length });
-        })
-        .catch(() => null);
-    }
+    if (platformMode) return undefined;
+    let cancelled = false;
+    // Settings come from EnterpriseSettingsContext — do not duplicate settings.getAll().
+    Promise.all([
+      api.branches?.getAll?.() ?? Promise.resolve([]),
+      api.notifications?.list?.() ?? Promise.resolve({ items: [], unread: 0 }),
+    ]).then(([branchRows, notifResult]) => {
+      if (cancelled) return;
+      if (Array.isArray(branchRows)) setBranches(branchRows);
+      if (notifResult?.items) {
+        setNotifications({ items: notifResult.items, unread: notifResult.unread || notifResult.items.length });
+      } else if (Array.isArray(notifResult)) {
+        setNotifications({ items: notifResult, unread: notifResult.length });
+      }
+    }).catch(() => null);
+    return () => { cancelled = true; };
   }, [platformMode, user?.company_id]);
 
   useEffect(() => {
@@ -549,7 +561,7 @@ export default function Layout() {
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              <NexoraAiNavButton onClick={() => setAiOpen(true)} />
+              {!platformMode && <AiNavButtonLazy onClick={() => setAiOpen(true)} />}
             </div>
           </div>
         </header>
@@ -578,7 +590,11 @@ export default function Layout() {
           <Outlet />
         </main>
 
-        <NexoraAiAssistant open={aiOpen} onOpenChange={setAiOpen} />
+        {!platformMode && aiOpen && (
+          <Suspense fallback={null}>
+            <AiBundle open={aiOpen} onOpenChange={setAiOpen} />
+          </Suspense>
+        )}
       </div>
     </div>
   );

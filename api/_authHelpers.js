@@ -122,6 +122,26 @@ export function createAnonClient() {
   });
 }
 
+function raceTimeout(promise, ms, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(message);
+      err.code = "TIMEOUT";
+      reject(err);
+    }, ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export async function verifyCallerFromRequest(req) {
   const header = req.headers?.authorization || req.headers?.Authorization || "";
   const match = String(header).match(/^Bearer\s+(.+)$/i);
@@ -132,7 +152,11 @@ export async function verifyCallerFromRequest(req) {
 
   try {
     const anon = createAnonClient();
-    const { data, error } = await anon.auth.getUser(token);
+    const { data, error } = await raceTimeout(
+      anon.auth.getUser(token),
+      8_000,
+      "Session verification timed out."
+    );
     if (error || !data?.user) {
       return { error: "Invalid or expired session.", status: 401 };
     }
@@ -152,6 +176,7 @@ export async function verifyCallerFromRequest(req) {
     };
   } catch (err) {
     if (err?.code === "CONFIG") return { error: err.message, status: 503 };
+    if (err?.code === "TIMEOUT") return { error: err.message || "Session verification timed out.", status: 504 };
     console.error("[verifyCallerFromRequest]", err);
     return { error: "Unable to verify session.", status: 500 };
   }
@@ -282,8 +307,8 @@ export function rateLimitResponse(res, retryAfterSec = 60) {
 }
 
 const ALLOWED_ORIGINS = new Set([
-  "https://www.httpsnexorapos.com",
-  "https://httpsnexorapos.com",
+  "https://www.nexorapospro.com",
+  "https://nexorapospro.com",
   "https://nexora-pos-eight.vercel.app",
   "https://nexora-pos-nexoraposapp.vercel.app",
 ]);
@@ -309,6 +334,7 @@ export function isAllowedOrigin(req) {
       const url = new URL(referer);
       if (ALLOWED_ORIGINS.has(url.origin) || isLocalDevOrigin(url.origin)) return true;
       if (url.hostname.endsWith(".vercel.app") && url.hostname.includes("nexora")) return true;
+      if (url.hostname === "nexorapospro.com" || url.hostname.endsWith(".nexorapospro.com")) return true;
     } catch {
       /* ignore */
     }
@@ -348,7 +374,207 @@ export function applySecurityHeaders(res) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()");
   res.setHeader("Cache-Control", "no-store");
+  // HSTS is primarily set at the edge (vercel.json); reinforce on API responses.
+  res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+}
+
+/**
+ * sales.user_id FK → public.profiles(id) (public app user row; id === auth.users.id).
+ * Auth-only accounts (ensure-permanent-owner, signup bootstrap, legacy seeds) may lack
+ * a profiles row — sync before any sales insert so the FK never fails.
+ */
+const PROFILE_ROLE_FALLBACKS = Object.freeze([
+  "platform_owner",
+  "owner",
+  "super_admin",
+  "admin",
+  "branch_manager",
+  "sales_manager",
+  "inventory_manager",
+  "accountant",
+  "sales",
+  "cashier",
+]);
+
+function profileRoleForSync(role) {
+  const normalized = normalizeRole(role);
+  if (PROFILE_ROLE_FALLBACKS.includes(normalized)) return normalized;
+  if (["owner", "admin", "cashier"].includes(normalized)) return normalized;
+  return "cashier";
+}
+
+function uniqueProfileEmail(preferred, authUserId) {
+  const base = String(preferred || "").trim().toLowerCase();
+  if (base && base.includes("@")) return base;
+  return `${String(authUserId).replace(/-/g, "").slice(0, 20)}@nexora.local`;
+}
+
+/**
+ * Ensure auth.users.id has a matching public.profiles row (same UUID).
+ * Returns the public profile id to use as sales.user_id / cashier id.
+ * Never returns null when caller.id is present — throws instead.
+ */
+export async function ensureUserSynced(admin, caller, extras = {}) {
+  const authUserId = caller?.id ? String(caller.id).trim() : "";
+  if (!authUserId) {
+    const err = new Error("Cannot sync user: missing auth user id.");
+    err.code = "UNAUTHENTICATED";
+    throw err;
+  }
+
+  const { data: existing, error: lookupError } = await admin
+    .from("profiles")
+    .select("id,name,email,role,company_id,branch_id,username,active")
+    .eq("id", authUserId)
+    .maybeSingle();
+
+  if (lookupError) {
+    const msg = String(lookupError.message || lookupError.code || "");
+    // Table missing is a deploy/schema issue — surface clearly.
+    if (/relation|does not exist|PGRST205|schema cache/i.test(msg)) {
+      const err = new Error("public.profiles is missing; cannot satisfy sales.user_id FK.");
+      err.code = "SCHEMA";
+      err.cause = lookupError;
+      throw err;
+    }
+    throw lookupError;
+  }
+
+  if (existing?.id) {
+    return {
+      authUserId,
+      publicUserId: String(existing.id),
+      profile: existing,
+      created: false,
+    };
+  }
+
+  // Prefer live auth record for email/name when available.
+  let authUser = null;
+  try {
+    const { data } = await admin.auth.admin.getUserById(authUserId);
+    authUser = data?.user || null;
+  } catch {
+    authUser = null;
+  }
+
+  const meta = authUser?.app_metadata || {};
+  const role = profileRoleForSync(caller.role || meta.role);
+  const email = uniqueProfileEmail(
+    caller.email || authUser?.email || meta.email,
+    authUserId
+  );
+  const name =
+    String(caller.name || meta.name || authUser?.user_metadata?.name || email || "User").trim() ||
+    "User";
+  const companyId =
+    extras.company_id != null && extras.company_id !== ""
+      ? extras.company_id
+      : caller.company_id != null && caller.company_id !== ""
+        ? caller.company_id
+        : meta.company_id != null && meta.company_id !== ""
+          ? meta.company_id
+          : null;
+  const branchId =
+    extras.branch_id != null && extras.branch_id !== ""
+      ? extras.branch_id
+      : caller.branch_id != null && caller.branch_id !== ""
+        ? caller.branch_id
+        : meta.branch_id != null && meta.branch_id !== ""
+          ? meta.branch_id
+          : null;
+
+  const fullPayload = {
+    id: authUserId,
+    name,
+    email,
+    role,
+    active: caller.active !== false && meta.active !== false && meta.active !== 0,
+    branch_id: isPlatformOwner(role) ? null : branchId,
+    company_id: isPlatformOwner(role) ? null : companyId,
+    username: String(caller.username || meta.username || "").trim() || null,
+  };
+
+  let { data: upserted, error: upsertError } = await admin
+    .from("profiles")
+    .upsert(fullPayload, { onConflict: "id" })
+    .select("id,name,email,role,company_id,branch_id,username,active")
+    .maybeSingle();
+
+  // Narrow schema / role check / email unique — retry with minimal compatible row.
+  if (upsertError) {
+    const msg = String(upsertError.message || upsertError.code || "");
+    const slimRole = ["owner", "admin", "cashier"].includes(role)
+      ? role
+      : role === "platform_owner" || role === "super_admin"
+        ? "owner"
+        : "cashier";
+    const slimEmail = /duplicate|unique|email/i.test(msg)
+      ? `${String(authUserId).replace(/-/g, "")}@nexora.local`
+      : email;
+    const slim = {
+      id: authUserId,
+      name,
+      email: slimEmail,
+      role: slimRole,
+      active: true,
+    };
+    ({ data: upserted, error: upsertError } = await admin
+      .from("profiles")
+      .upsert(slim, { onConflict: "id" })
+      .select("id,name,email,role,company_id,branch_id,username,active")
+      .maybeSingle());
+  }
+
+  if (upsertError) {
+    console.error("[ensureUserSynced] profiles upsert failed", {
+      auth_user_id: authUserId,
+      error: upsertError.message || upsertError,
+    });
+    const err = new Error(
+      `Unable to sync public.profiles for sales.user_id: ${upsertError.message || "upsert failed"}`
+    );
+    err.code = "PROFILE_SYNC";
+    err.cause = upsertError;
+    throw err;
+  }
+
+  // Confirm row exists even if select returned null (some PostgREST configs).
+  if (!upserted?.id) {
+    const { data: confirmed, error: confirmError } = await admin
+      .from("profiles")
+      .select("id,name,email,role,company_id,branch_id,username,active")
+      .eq("id", authUserId)
+      .maybeSingle();
+    if (confirmError || !confirmed?.id) {
+      const err = new Error("Profile sync did not create a public.profiles row.");
+      err.code = "PROFILE_SYNC";
+      throw err;
+    }
+    upserted = confirmed;
+  }
+
+  console.info("[ensureUserSynced] created public.profiles row", {
+    auth_user_id: authUserId,
+    public_user_id: upserted.id,
+    company_id: upserted.company_id ?? companyId,
+    branch_id: upserted.branch_id ?? branchId,
+  });
+
+  return {
+    authUserId,
+    publicUserId: String(upserted.id),
+    profile: upserted,
+    created: true,
+  };
+}
+
+/** Resolve sales.user_id (public.profiles.id). Creates the profile if missing. */
+export async function resolvePublicUserId(admin, caller, extras = {}) {
+  const synced = await ensureUserSynced(admin, caller, extras);
+  return synced.publicUserId;
 }
 
 // Keep unused helper referenced for parity with prior exports used by callers.

@@ -6,6 +6,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertNotProductionSupabase } from "./_prodSafety.mjs";
 
 function loadEnvLocal(path) {
   if (!existsSync(path)) throw new Error(`Missing ${path}. Run: npx vercel env pull .env.local --environment=production`);
@@ -45,6 +46,9 @@ console.error(JSON.stringify({
 if (!url || !serviceKey) {
   console.error(JSON.stringify({ ok: false, error: "Missing VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local" }));
   process.exit(1);
+}
+if (url) {
+  assertNotProductionSupabase(url, { scriptName: "e2e-provision-confirmed-owner.mjs" });
 }
 
 const ts = Date.now();

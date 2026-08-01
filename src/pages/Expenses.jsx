@@ -5,6 +5,7 @@ import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import CurrencyMoneyFields from "../components/CurrencyMoneyFields";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { ListSkeleton } from "@/components/ui/skeleton";
 const emptyForm = {
   name: "",
@@ -62,6 +63,9 @@ export default function Expenses() {
     }
   };
   useEffect(() => { load(); }, []);
+
+  // ERP real-time: expenses feed straight into dashboard profit/expense KPIs.
+  useRealtimeRefresh(["expenses"], load);
 
   const handleSave = async (e) => {
     e.preventDefault();

@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 echo ================================================
-echo   NEXORA POS - Windows Build Pipeline
+echo   NEXORA POS PRO - Windows Build Pipeline
 echo ================================================
 echo.
 
@@ -68,7 +68,7 @@ echo ================================================
 echo   BUILD SUCCESSFUL
 echo ================================================
 echo Find your files in the release\ folder:
-echo   - NEXORA-POS-Setup-1.0.0.exe      (installer)
-echo   - NEXORA-POS-Portable-1.0.0.exe   (portable, no install needed)
+echo   - Nexora-POS-Pro-Setup-1.0.0.exe      (installer)
+echo   - Nexora-POS-Pro-Portable-1.0.0.exe   (portable, no install needed)
 echo.
 pause

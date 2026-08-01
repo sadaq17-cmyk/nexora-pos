@@ -15,10 +15,14 @@ import { useAuth } from "./AuthContext";
 
 const DEFAULT_SETTINGS = {
   currency: "KES",
+  currency_code: "KES",
   currency_symbol: "KSh",
+  locale: "en-KE",
+  country: "Kenya",
+  country_code: "KE",
   vat_enabled: "false",
   vat_rate: "0",
-  store_name: "Nexora POS Enterprise",
+  store_name: "",
   store_address: "",
   store_phone: "",
   tax_pin: "",
@@ -43,12 +47,19 @@ export function EnterpriseSettingsProvider({ children }) {
       setLoading(false);
       return;
     }
-    const next = api.settings.getPublic
-      ? await api.settings.getPublic()
-      : await api.settings.getAll();
-    setSettings((current) => ({ ...current, ...(next || {}) }));
-    setLoading(false);
-  }, [user]);
+    try {
+      const next = api.settings.getPublic
+        ? await api.settings.getPublic()
+        : await api.settings.getAll();
+      if (next && typeof next === "object" && next.success !== false) {
+        setSettings((current) => ({ ...current, ...next }));
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn("[EnterpriseSettings] refresh failed", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.id, user?.company_id]);
 
   useEffect(() => {
     refreshSettings();
@@ -67,8 +78,11 @@ export function EnterpriseSettingsProvider({ children }) {
     return () => window.removeEventListener("nexora:settings-updated", listener);
   }, [refreshSettings]);
 
-  const currencyCode = normalizeCurrencyCode(settings.base_currency_code || settings.currency);
+  const currencyCode = normalizeCurrencyCode(settings.base_currency_code || settings.currency_code || settings.currency);
   const currency = getCurrency(currencyCode);
+  const locale = settings.locale || currency.locale || "en-KE";
+  const country = settings.country || "Kenya";
+  const countryCode = settings.country_code || "";
   const activeCurrencies = useMemo(
     () => getActiveCurrencies(settings.active_currencies || []),
     [settings.active_currencies]
@@ -94,7 +108,9 @@ export function EnterpriseSettingsProvider({ children }) {
       if (reportCurrencyCode === currencyCode) {
         return formatCurrency(baseValue, currencyCode, options);
       }
-      const rateRow = activeCurrencies.find((c) => c.code === reportCurrencyCode);
+      const rateRow = (Array.isArray(activeCurrencies) ? activeCurrencies : []).find(
+        (c) => c.code === reportCurrencyCode
+      );
       const rate = Number(rateRow?.exchange_rate_to_base || 1);
       const converted = convertFromBase(baseValue, rate || 1);
       return formatCurrency(converted, reportCurrencyCode, options);
@@ -107,6 +123,10 @@ export function EnterpriseSettingsProvider({ children }) {
       settings,
       loading,
       currency,
+      currencyCode,
+      locale,
+      country,
+      countryCode,
       baseCurrency,
       activeCurrencies,
       multiCurrencyEnabled,
@@ -125,6 +145,10 @@ export function EnterpriseSettingsProvider({ children }) {
       settings,
       loading,
       currency,
+      currencyCode,
+      locale,
+      country,
+      countryCode,
       baseCurrency,
       activeCurrencies,
       multiCurrencyEnabled,

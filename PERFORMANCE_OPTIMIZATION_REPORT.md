@@ -94,5 +94,5 @@ Route-level `React.lazy` was already in place.
 - Migration apply: `npx supabase db push --linked` — **applied** `013_performance_indexes.sql` (existing company_id indexes skipped via IF NOT EXISTS)
 - Deploy: `npx vercel --prod --yes` — **READY**
   - Production: https://nexora-lzegyah07-nexoraposapp.vercel.app
-  - Alias: https://www.httpsnexorapos.com
+  - Alias: https://www.nexorapospro.com
   - Inspect: https://vercel.com/nexoraposapp/nexora-pos/AvJb8FPgLouAk7LBwNfNC5pynxqx

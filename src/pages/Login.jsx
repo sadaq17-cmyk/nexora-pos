@@ -2,12 +2,11 @@ import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Store } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { PERMANENT_COMPANY_OWNER } from "../lib/permanentOwner";
 import { PERMANENT_PLATFORM_ADMIN } from "../lib/permanentPlatformAdmin";
 import { PASSWORD_HINT, validatePassword } from "../lib/passwordPolicy";
 
 export default function Login() {
-  const { user, login, loginByEmail, verifyMfa, mustChangePassword, subscriptionLocked } = useAuth();
+  const { user, login, loginByEmail, verifyMfa, verifySmsOtpLogin, mustChangePassword, subscriptionLocked } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState("email");
   const [email, setEmail] = useState("");
@@ -22,6 +21,9 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const [mfaFactorId, setMfaFactorId] = useState("");
   const [mfaCode, setMfaCode] = useState("");
+  const [smsOtpPending, setSmsOtpPending] = useState(false);
+  const [smsOtpCode, setSmsOtpCode] = useState("");
+  const [smsOtpHint, setSmsOtpHint] = useState("");
 
   if (user) {
     if (mustChangePassword) return <Navigate to="/change-password" replace />;
@@ -33,6 +35,8 @@ export default function Login() {
     if (result.success) {
       setMfaFactorId("");
       setMfaCode("");
+      setSmsOtpPending(false);
+      setSmsOtpCode("");
       if (result.mustChangePassword || result.user?.must_change_password) {
         navigate("/change-password");
       } else if (result.subscriptionLocked) {
@@ -44,6 +48,11 @@ export default function Login() {
       setMfaFactorId(result.factorId || "");
       setMfaCode("");
       setError(result.error || "Enter your authenticator code.");
+    } else if (result.code === "SMS_OTP_REQUIRED") {
+      setSmsOtpPending(true);
+      setSmsOtpCode("");
+      setSmsOtpHint(result.maskedPhone || "");
+      setError(result.error || "Enter the 6-digit code we texted to your phone.");
     } else {
       if (result.code === "COMPANY_REQUIRED") setCompanyRequired(true);
       setError(result.error || "Login failed.");
@@ -60,6 +69,12 @@ export default function Login() {
       finish(result);
       return;
     }
+    if (smsOtpPending) {
+      const result = await verifySmsOtpLogin(smsOtpCode);
+      setSubmitting(false);
+      finish(result);
+      return;
+    }
     const policy = validatePassword(password);
     if (password.length < 8) {
       setSubmitting(false);
@@ -68,7 +83,8 @@ export default function Login() {
     }
     let result;
     if (mode === "platform") {
-      result = await login(platformIdentifier, platformUsername, password, rememberMe);
+      // Always use the canonical production Platform Identifier (ignore typos in the field).
+      result = await login("platform", platformUsername, password, rememberMe);
     } else if (mode === "company") {
       result = await login(companyIdentifier, email, password, rememberMe);
     } else {
@@ -84,6 +100,8 @@ export default function Login() {
     setCompanyRequired(false);
     setMfaFactorId("");
     setMfaCode("");
+    setSmsOtpPending(false);
+    setSmsOtpCode("");
   };
 
   return (
@@ -93,7 +111,7 @@ export default function Login() {
           <div className="nx-login-brand-mark" aria-hidden>
             <Store size={22} strokeWidth={1.75} />
           </div>
-          <h1>Nexora POS</h1>
+          <h1>Nexora POS Pro</h1>
           <p>Enterprise point of sale for retail and multi-branch teams.</p>
         </div>
 
@@ -123,18 +141,21 @@ export default function Login() {
           </div>
 
           <form onSubmit={handleSubmit} className="nx-login-form">
-            {!mfaFactorId && mode === "platform" && (
+            {!mfaFactorId && !smsOtpPending && mode === "platform" && (
               <>
                 <div className="nx-login-field">
                   <label className="nx-login-label" htmlFor="login-platform-id">Platform identifier</label>
                   <input
                     id="login-platform-id"
                     required
+                    readOnly
                     value={platformIdentifier}
                     onChange={(event) => setPlatformIdentifier(event.target.value)}
                     className="nx-login-input"
                     autoComplete="organization"
+                    title="Fixed value for Super Owner login"
                   />
+                  <p className="nx-login-hint">Use exactly: <strong>platform</strong></p>
                 </div>
                 <div className="nx-login-field">
                   <label className="nx-login-label" htmlFor="login-platform-user">Username or email</label>
@@ -151,7 +172,7 @@ export default function Login() {
               </>
             )}
 
-            {!mfaFactorId && mode === "company" && (
+            {!mfaFactorId && !smsOtpPending && mode === "company" && (
               <div className="nx-login-field">
                 <label className="nx-login-label" htmlFor="login-company-code">Company code or verified domain</label>
                 <input
@@ -160,13 +181,13 @@ export default function Login() {
                   value={companyIdentifier}
                   onChange={(event) => setCompanyIdentifier(event.target.value)}
                   className="nx-login-input"
-                  placeholder={PERMANENT_COMPANY_OWNER.company_code}
+                  placeholder="Your company code"
                   autoComplete="organization"
                 />
               </div>
             )}
 
-            {!mfaFactorId && mode !== "platform" && (
+            {!mfaFactorId && !smsOtpPending && mode !== "platform" && (
               <div className="nx-login-field">
                 <label className="nx-login-label" htmlFor="login-email">
                   {mode === "company" ? "Username or email" : "Email"}
@@ -178,13 +199,13 @@ export default function Login() {
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
                   className="nx-login-input"
-                  placeholder={mode === "company" ? PERMANENT_COMPANY_OWNER.username : PERMANENT_COMPANY_OWNER.email}
+                  placeholder={mode === "company" ? "you@company.com" : "you@company.com"}
                   autoComplete="username"
                 />
               </div>
             )}
 
-            {!mfaFactorId && mode === "email" && companyRequired && (
+            {!mfaFactorId && !smsOtpPending && mode === "email" && companyRequired && (
               <div className="nx-login-field">
                 <label className="nx-login-label" htmlFor="login-company-required">Company code required</label>
                 <input
@@ -199,7 +220,7 @@ export default function Login() {
               </div>
             )}
 
-            {!mfaFactorId && (
+            {!mfaFactorId && !smsOtpPending && (
               <div className="nx-login-field">
                 <label className="nx-login-label" htmlFor="login-password">Password</label>
                 <div className="nx-login-password">
@@ -243,7 +264,25 @@ export default function Login() {
               </div>
             )}
 
-            {!mfaFactorId && (
+            {smsOtpPending && (
+              <div className="nx-login-field">
+                <label className="nx-login-label" htmlFor="login-sms-otp">SMS verification code</label>
+                <input
+                  id="login-sms-otp"
+                  required
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={smsOtpCode}
+                  onChange={(event) => setSmsOtpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  className="nx-login-input"
+                  placeholder="6-digit code"
+                />
+                {smsOtpHint ? <p className="nx-login-hint">Sent to {smsOtpHint}</p> : null}
+              </div>
+            )}
+
+            {!mfaFactorId && !smsOtpPending && (
               <div className="nx-login-meta">
                 <label className="nx-login-remember">
                   <input
@@ -269,8 +308,8 @@ export default function Login() {
               className={`nx-login-submit${submitting ? " is-loading" : ""}`}
             >
               {submitting
-                ? (mfaFactorId ? "Verifying…" : "Signing in…")
-                : (mfaFactorId ? "Verify code" : "Sign in")}
+                ? (mfaFactorId || smsOtpPending ? "Verifying…" : "Signing in…")
+                : (mfaFactorId || smsOtpPending ? "Verify code" : "Sign in")}
             </button>
           </form>
 

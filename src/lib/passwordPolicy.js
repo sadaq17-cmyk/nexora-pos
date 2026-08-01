@@ -1,4 +1,4 @@
-/** Shared strong password policy for Nexora POS (client + docs). */
+/** Shared strong password policy for Nexora POS Pro (client + docs). */
 
 export const PASSWORD_MIN_LENGTH = 8;
 

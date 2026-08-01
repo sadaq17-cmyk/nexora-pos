@@ -44,7 +44,7 @@ function download(blob, name) {
 
 export function exportCsv(analytics, money, labels = {}) {
   const rows = [
-    ["Nexora POS Enterprise Analytics Report"],
+    ["Nexora POS Pro Analytics Report"],
     ...contextLines(analytics, labels).map((line) => [line]),
     [],
     ["Metric", "Value"],
@@ -64,7 +64,7 @@ export async function exportExcel(analytics, money, labels = {}) {
   const XLSX = await import("xlsx");
   const workbook = XLSX.utils.book_new();
   const summary = XLSX.utils.aoa_to_sheet([
-    ["Nexora POS Enterprise Analytics Report"],
+    ["Nexora POS Pro Analytics Report"],
     ...contextLines(analytics, labels).map((line) => [line]),
     [],
     ["Metric", "Value"],
@@ -104,7 +104,7 @@ export async function exportPdf(analytics, money, labels = {}) {
   const doc = new jsPDF();
   doc.setFontSize(18);
   doc.setTextColor(37, 99, 235);
-  doc.text("Nexora POS Enterprise", 14, 18);
+  doc.text("Nexora POS Pro", 14, 18);
   doc.setFontSize(12);
   doc.setTextColor(27, 36, 57);
   doc.text("Reports & Analytics", 14, 26);
@@ -144,6 +144,6 @@ export function printReport(analytics, money, labels = {}) {
   if (!popup) throw new Error("Pop-up blocked. Allow pop-ups to print this report.");
   const metrics = metricRows(analytics, money).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
   const sales = analytics.sales.slice(0, 100).map((sale) => `<tr><td>${escapeHtml(sale.invoice_no)}</td><td>${escapeHtml(new Date(sale.created_at).toLocaleString())}</td><td>${escapeHtml(sale.cashier)}</td><td>${escapeHtml(sale.payment_method)}</td><td>${escapeHtml(money(sale.total))}</td></tr>`).join("");
-  popup.document.write(`<!doctype html><html><head><title>Nexora Analytics Report</title><style>body{font-family:Arial,sans-serif;color:#1B2439;padding:32px}h1{color:#2563EB;margin:0}p{color:#6B7690}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:24px 0}.metrics div{border:1px solid #E4E9F2;border-radius:12px;padding:12px}.metrics span{display:block;color:#6B7690;font-size:12px}.metrics strong{display:block;margin-top:5px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;border-bottom:1px solid #E4E9F2;padding:8px}@media print{body{padding:0}}</style></head><body><h1>Nexora POS Enterprise</h1><h2>Reports &amp; Analytics</h2><p>${contextLines(analytics, labels).map(escapeHtml).join("<br>")}</p><div class="metrics">${metrics}</div><h3>Transactions</h3><table><thead><tr><th>Invoice</th><th>Date</th><th>Cashier</th><th>Payment</th><th>Total</th></tr></thead><tbody>${sales || '<tr><td colspan="5">No transactions for this period.</td></tr>'}</tbody></table><script>window.onload=()=>window.print();<\/script></body></html>`);
+  popup.document.write(`<!doctype html><html><head><title>Nexora POS Pro Analytics Report</title><style>body{font-family:Arial,sans-serif;color:#1B2439;padding:32px}h1{color:#2563EB;margin:0}p{color:#6B7690}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:24px 0}.metrics div{border:1px solid #E4E9F2;border-radius:12px;padding:12px}.metrics span{display:block;color:#6B7690;font-size:12px}.metrics strong{display:block;margin-top:5px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;border-bottom:1px solid #E4E9F2;padding:8px}@media print{body{padding:0}}</style></head><body><h1>Nexora POS Pro</h1><h2>Reports &amp; Analytics</h2><p>${contextLines(analytics, labels).map(escapeHtml).join("<br>")}</p><div class="metrics">${metrics}</div><h3>Transactions</h3><table><thead><tr><th>Invoice</th><th>Date</th><th>Cashier</th><th>Payment</th><th>Total</th></tr></thead><tbody>${sales || '<tr><td colspan="5">No transactions for this period.</td></tr>'}</tbody></table><script>window.onload=()=>window.print();<\/script></body></html>`);
   popup.document.close();
 }

@@ -9,15 +9,15 @@ export default function Features() {
   return (
     <div>
       <Seo
-        title="Features — Nexora POS"
-        description="Explore Nexora POS capabilities: retail checkout, inventory, barcodes, purchasing, CRM, roles, analytics, multi-branch, subscriptions, and secure authentication."
+        title="Features — Nexora POS Pro"
+        description="Explore Nexora POS Pro capabilities: retail checkout, inventory, barcodes, purchasing, CRM, roles, analytics, multi-branch, subscriptions, and secure authentication."
       />
 
       <section className="nx-section" style={{ paddingTop: "3.5rem" }}>
         <div className="nx-section__label">Platform capabilities</div>
         <h1 className="nx-section__title">Features that run the full store stack</h1>
         <p className="nx-section__lead">
-          Nexora POS covers front-of-house checkout and back-office operations for retail, supermarket, restaurant, pharmacy, hardware, electronics, boutique, wholesale, and mini market businesses.
+          Nexora POS Pro covers front-of-house checkout and back-office operations for retail, supermarket, restaurant, pharmacy, hardware, electronics, boutique, wholesale, and mini market businesses.
         </p>
       </section>
 
@@ -37,7 +37,7 @@ export default function Features() {
 
       <section className="nx-section nx-section--soft">
         <div className="nx-section__label">Product screenshots</div>
-        <h2 className="nx-section__title">Real Nexora POS interface</h2>
+        <h2 className="nx-section__title">Real Nexora POS Pro interface</h2>
         <p className="nx-section__lead">Product UI previews only — no stock application screenshots.</p>
         <ScreenshotGallery />
       </section>

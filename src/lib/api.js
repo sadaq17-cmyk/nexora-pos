@@ -17,7 +17,7 @@ if (
   const { mockApi } = await import("./mockApi");
   resolvedApi = mockApi;
   console.info("[NEXORA POS] DEV mockApi (localStorage) enabled via VITE_USE_MOCK_API=true");
-} else if (!hasElectronApi) {
+} else if (!hasElectronApi && import.meta.env.DEV) {
   console.info("[NEXORA POS] Using Supabase production data plane (/api/pos).");
 }
 

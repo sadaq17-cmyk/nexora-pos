@@ -2,6 +2,7 @@ import {
   applySecurityHeaders,
   consumeRateLimit,
   createAdminClient,
+  ensureUserSynced,
   getClientIp,
   isAllowedOrigin,
   parseBody,
@@ -13,6 +14,7 @@ import {
   verifyCallerFromRequest,
 } from "./_authHelpers.js";
 import { ensurePermanentOwnerHandler } from "./_ensurePermanentOwner.js";
+import { createCompanyWorkspace, completePublicSignup } from "./_signupCompany.js";
 
 export default async function handler(req, res) {
   applySecurityHeaders(res);
@@ -20,6 +22,68 @@ export default async function handler(req, res) {
   if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
 
   const body = parseBody(req) || {};
+  const ip = getClientIp(req);
+
+  // Public company code lookup — no Auth session. Used at login so tenants
+  // type THEIR company code, never Super Owner NEXORA001 by accident without a match check.
+  if (body.action === "resolve_company") {
+    if (!consumeRateLimit(`resolve-company:ip:${ip}`, 30, 60_000)) {
+      return rateLimitResponse(res, 60);
+    }
+    const code = sanitizeText(body.company_code || body.company_identifier || body.code, 32).toUpperCase();
+    if (!code || code === "PLATFORM") {
+      return res.status(200).json({ success: false, error: "Company not found." });
+    }
+    try {
+      const admin = createAdminClient();
+      const { data, error } = await admin
+        .from("companies")
+        .select("id,name,code,status")
+        .eq("code", code)
+        .maybeSingle();
+      if (error) {
+        console.error("[bootstrap-company-owner] resolve_company", error);
+        return jsonError(res, 502, "Unable to resolve company.");
+      }
+      if (!data || ["deleted", "disabled", "suspended"].includes(String(data.status || "").toLowerCase())) {
+        return res.status(200).json({ success: false, error: "Company not found." });
+      }
+      return res.status(200).json({
+        success: true,
+        company: {
+          id: data.id,
+          name: data.name,
+          code: data.code,
+          status: data.status,
+          logo: "",
+        },
+      });
+    } catch (err) {
+      console.error("[bootstrap-company-owner] resolve_company", err);
+      return jsonError(res, 500, "Unable to resolve company.");
+    }
+  }
+
+  const publicSignupRequested =
+    body.action === "public_signup" || body.public_signup === true;
+  if (publicSignupRequested) {
+    if (!consumeRateLimit(`public-signup:ip:${ip}`, 5, 60 * 60_000)) {
+      return rateLimitResponse(res, 60);
+    }
+    const emailKey = String(body.email || "").trim().toLowerCase();
+    if (emailKey && !consumeRateLimit(`public-signup:email:${emailKey}`, 3, 10 * 60_000)) {
+      return rateLimitResponse(res, 60);
+    }
+    try {
+      const result = await completePublicSignup(body, { ip });
+      return res.status(result.status || 200).json(result.body);
+    } catch (err) {
+      if (err?.code === "CONFIG") return jsonError(res, 503, err.message, "CONFIG");
+      console.error("[bootstrap-company-owner] public_signup", err);
+      return jsonError(res, 500, "Unable to complete signup right now. Please try again.");
+    }
+  }
+
   const ensureRequested =
     body.ensure_permanent === true ||
     body.action === "ensure_permanent" ||
@@ -34,7 +98,25 @@ export default async function handler(req, res) {
   const verified = await verifyCallerFromRequest(req);
   if (verified.error) return jsonError(res, verified.status, verified.error);
 
-  const ip = getClientIp(req);
+  // Hobby plan: signup company creation shares this route (no extra serverless function).
+  const signupRequested =
+    body.action === "signup_company" ||
+    body.create_company === true ||
+    Boolean(body.company_name && body.supabase_user_id && !body.company_id);
+
+  if (signupRequested && (body.action === "signup_company" || body.create_company === true)) {
+    if (!consumeRateLimit(`signup-company:${verified.caller.id}:${ip}`, 5, 60000)) {
+      return rateLimitResponse(res, 60);
+    }
+    try {
+      const result = await createCompanyWorkspace({ caller: verified.caller, body });
+      return res.status(result.status || 200).json(result.body);
+    } catch (err) {
+      console.error("[bootstrap-company-owner] signup_company", err);
+      return jsonError(res, 500, err?.message || "Unable to create company workspace.");
+    }
+  }
+
   if (!consumeRateLimit(`bootstrap-owner:${verified.caller.id}:${ip}`, 10, 60000)) {
     return rateLimitResponse(res, 60);
   }
@@ -76,6 +158,7 @@ export default async function handler(req, res) {
 
     const existingRole = user.app_metadata?.role;
     if (existingRole != null && String(existingRole).trim() !== "") {
+      // Already provisioned — only allow metadata enrichment for the caller's own company.
       if (String(user.app_metadata?.company_id) === String(companyId) && (companyCode || companyName)) {
         const enriched = {
           ...(user.app_metadata || {}),
@@ -91,6 +174,20 @@ export default async function handler(req, res) {
         if (updateError) {
           return jsonError(res, 502, "Unable to update company metadata.", "UPDATE_FAILED");
         }
+        try {
+          await ensureUserSynced(admin, {
+            id: updated.user.id,
+            email: updated.user.email || email,
+            name: updated.user.app_metadata?.name || name || updated.user.email,
+            role: normalizeRole(updated.user.app_metadata?.role) || "owner",
+            company_id: updated.user.app_metadata?.company_id ?? companyId,
+            branch_id: updated.user.app_metadata?.branch_id ?? branchId,
+            username: updated.user.app_metadata?.username || username,
+            active: true,
+          });
+        } catch (syncErr) {
+          console.error("[bootstrap-company-owner] enrich profile sync", syncErr);
+        }
         return res.status(200).json({
           success: true,
           enriched: true,
@@ -105,6 +202,35 @@ export default async function handler(req, res) {
         });
       }
       return jsonError(res, 409, "This account is already provisioned.", "ALREADY_PROVISIONED");
+    }
+
+    // Empty-role claim path: never allow arbitrary company_id takeover.
+    // Prefer signup_company (createCompanyWorkspace). Legacy bootstrap is only allowed when
+    // the company row exists, has no other owner, and email matches the authenticated user.
+    const { data: companyRow, error: companyLookupError } = await admin
+      .from("companies")
+      .select("id, owner_user_id, email, status")
+      .eq("id", companyId)
+      .maybeSingle();
+    if (companyLookupError && companyLookupError.code !== "PGRST116") {
+      console.error("[bootstrap-company-owner] company lookup", companyLookupError);
+      return jsonError(res, 502, "Unable to verify company ownership.", "LOOKUP_FAILED");
+    }
+    if (!companyRow) {
+      return jsonError(
+        res,
+        403,
+        "Use company signup to create a new workspace. Arbitrary company_id claims are not allowed.",
+        "FORBIDDEN"
+      );
+    }
+    const ownerId = companyRow.owner_user_id;
+    if (ownerId && String(ownerId) !== String(supabaseUserId)) {
+      return jsonError(res, 403, "This company already has an owner.", "FORBIDDEN");
+    }
+    const companyEmail = String(companyRow.email || "").toLowerCase();
+    if (companyEmail && companyEmail !== email) {
+      return jsonError(res, 403, "Company email does not match the authenticated user.", "FORBIDDEN");
     }
 
     const app_metadata = {
@@ -135,6 +261,27 @@ export default async function handler(req, res) {
     if (updateError) {
       console.error("[bootstrap-company-owner] update failed:", updateError);
       return jsonError(res, 502, "Unable to provision company owner metadata.", "UPDATE_FAILED");
+    }
+
+    try {
+      await ensureUserSynced(admin, {
+        id: updated.user.id,
+        email: updated.user.email || email,
+        name,
+        role: "owner",
+        company_id: companyId,
+        branch_id: branchId,
+        username,
+        active: true,
+      });
+    } catch (syncErr) {
+      console.error("[bootstrap-company-owner] profile sync", syncErr);
+      return jsonError(
+        res,
+        502,
+        `Owner provisioned but profile sync failed: ${syncErr?.message || "unknown"}`,
+        "PROFILE_SYNC"
+      );
     }
 
     return res.status(200).json({

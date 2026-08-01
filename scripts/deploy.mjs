@@ -28,7 +28,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const IS_WIN = process.platform === "win32";
 
-const CUSTOM_DOMAIN = "https://www.httpsnexorapos.com";
+const CUSTOM_DOMAIN = "https://www.nexorapospro.com";
 const KEY_ROUTES = [
   "/",
   "/login",
@@ -40,6 +40,9 @@ const KEY_ROUTES = [
   "/settings",
   "/settings/login-security",
   "/verify-email-change",
+  "/download",
+  "/pricing",
+  "/subscription/renew",
 ];
 
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -149,8 +152,8 @@ function parseVercelOutput(text) {
     alias = aliasMatch[1].replace(/[)\],.]+$/, "");
   }
   // Also scan for the known custom domain
-  if (text.includes("httpsnexorapos.com")) {
-    const custom = text.match(/https?:\/\/(?:www\.)?httpsnexorapos\.com[^\s]*/);
+  if (text.includes("nexorapospro.com")) {
+    const custom = text.match(/https?:\/\/(?:www\.)?nexorapospro\.com[^\s]*/);
     if (custom) alias = custom[0].replace(/[)\],.]+$/, "");
   }
 

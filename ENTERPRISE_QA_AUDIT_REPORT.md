@@ -3,7 +3,7 @@
 **Date:** 2026-07-20  
 **Workspace:** `C:\Users\sadam\Downloads\nexora-pos-final\nexora-pos`  
 **Supabase (linked):** `ohrpezhlnjwiilojdqbo`  
-**Production:** https://www.httpsnexorapos.com  
+**Production:** https://www.nexorapospro.com  
 **Method:** Code-path inspection, RBAC matrix verification, API/RLS review, static QA script (`scripts/enterprise-qa-static.mjs`), production `health.probe`, Vite build. Interactive UI CRUD skipped (no operator credentials in session).
 
 ---
@@ -149,7 +149,7 @@
 | Migration 008 | **Applied** to `ohrpezhlnjwiilojdqbo` |
 | Deploy | **PASS** |
 | Deploy ID | `dpl_44GhknZ7UdLbRJqUF6qTHK9rW4kg` |
-| Production URL | https://www.httpsnexorapos.com |
+| Production URL | https://www.nexorapospro.com |
 | Deployment URL | https://nexora-mtl3y3o87-nexoraposapp.vercel.app |
 | Inspect | https://vercel.com/nexoraposapp/nexora-pos/44GhknZ7UdLbRJqUF6qTHK9rW4kg |
 | health.probe | Verified post-deploy |

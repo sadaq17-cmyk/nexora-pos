@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import {
   Boxes,
   DollarSign,
@@ -71,6 +72,8 @@ const TABS = [
   { id: "brands", label: "Brands", icon: Tag },
   { id: "units", label: "Units", icon: Ruler },
   { id: "variants", label: "Variants", icon: Layers },
+  { id: "serials", label: "Serials", icon: Tag },
+  { id: "lots", label: "Lots FIFO/FEFO", icon: Package },
   { id: "reports", label: "Reports", icon: BarChart3 },
   { id: "history", label: "History", icon: Clock },
 ];
@@ -121,6 +124,7 @@ const emptyMove = {
   qty: 1,
   batch_number: "",
   expiry_date: "",
+  serial_numbers: "",
   note: "",
 };
 
@@ -169,10 +173,36 @@ export default function Inventory() {
   const [countNotes, setCountNotes] = useState("");
   const [reportSection, setReportSection] = useState("valuation");
   const [movementTypeFilter, setMovementTypeFilter] = useState("");
+  const [ledgerVariants, setLedgerVariants] = useState([]);
+  const [serialRows, setSerialRows] = useState([]);
+  const [openLots, setOpenLots] = useState([]);
+  const [variantForm, setVariantForm] = useState({
+    product_id: "",
+    name: "",
+    sku: "",
+    barcode: "",
+    price: "",
+    cost: "",
+    attributes: "",
+  });
+  const [serialForm, setSerialForm] = useState({
+    product_id: "",
+    warehouse_id: "",
+    serial_numbers: "",
+  });
+  const [lotPickForm, setLotPickForm] = useState({
+    product_id: "",
+    warehouse_id: "",
+    qty: 1,
+    preference: "auto",
+  });
+  const [lotPickPreview, setLotPickPreview] = useState(null);
+  const [editingVariantId, setEditingVariantId] = useState(null);
 
   const canEdit = can("inventory", "edit");
   const canCreate = can("inventory", "create");
   const canApprove = can("inventory", "approve");
+  const canSetMainWarehouse = can("inventory", "delete");
   const canProductCreate = can("products", "create");
   const canProductEdit = can("products", "edit");
   const canProductDelete = can("products", "delete");
@@ -210,6 +240,9 @@ export default function Inventory() {
         transferRows,
         chartRows,
         countRows,
+        variantLedgerRows,
+        serialLedgerRows,
+        lotRows,
       ] = await Promise.all([
         api.inventory.getStats().catch(() => ({})),
         api.products.getAll({ include_archived: includeArchived, include_deleted: includeDeleted }).catch(() => []),
@@ -223,6 +256,9 @@ export default function Inventory() {
         api.inventory.getTransfers().catch(() => []),
         api.inventory.getMovementChart?.(30).catch(() => []) || Promise.resolve([]),
         api.inventory.getCounts?.().catch(() => []) || Promise.resolve([]),
+        api.inventory.listVariantSkus?.().catch(() => []) || Promise.resolve([]),
+        api.inventory.listSerials?.({ limit: 200 }).catch(() => []) || Promise.resolve([]),
+        api.inventory.listOpenLots?.({ limit: 200 }).catch(() => []) || Promise.resolve([]),
       ]);
       const catalog = isProductionDataPlane ? excludeDemoProducts(productRows || []) : productRows || [];
       setStats(statsRow || {});
@@ -242,6 +278,9 @@ export default function Inventory() {
       setTransfers(transferRows || []);
       setChartData(chartRows || []);
       setCounts(countRows || []);
+      setLedgerVariants(variantLedgerRows || []);
+      setSerialRows(serialLedgerRows || []);
+      setOpenLots(lotRows || []);
     } finally {
       setLoading(false);
     }
@@ -251,6 +290,18 @@ export default function Inventory() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productFilter]);
+
+  // ERP real-time: purchases, sales, returns, transfers, and adjustments all
+  // move stock — keep the inventory hub in sync automatically.
+  useRealtimeRefresh(["inventory", "products", "purchases", "sales"], load, { debounceMs: 1200 });
+
+  // Default the transfer source to the Main Store — the primary transfer
+  // direction is out of the Main Store into a branch/store warehouse.
+  useEffect(() => {
+    if (!warehouses.length || transferForm.from_warehouse_id) return;
+    const main = warehouses.find((w) => w.is_main);
+    if (main) setTransferForm((f) => ({ ...f, from_warehouse_id: String(main.id) }));
+  }, [warehouses, transferForm.from_warehouse_id]);
 
   useEffect(() => {
     if (tab === "reports" && !reports) {
@@ -303,6 +354,10 @@ export default function Inventory() {
   }, [movements, movementTypeFilter]);
 
   const submitMovement = async (mode) => {
+    const serials = String(moveForm.serial_numbers || "")
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
     const payload = {
       product_id: Number(moveForm.product_id),
       variant_id: moveForm.variant_id ? Number(moveForm.variant_id) : null,
@@ -311,6 +366,8 @@ export default function Inventory() {
       batch_number: moveForm.batch_number || null,
       expiry_date: moveForm.expiry_date || null,
       note: moveForm.note || "",
+      serial_numbers: serials.length ? serials.join("\n") : undefined,
+      serials: serials.length ? serials : undefined,
     };
     if (!payload.product_id || !payload.qty) {
       showToast("Product and quantity are required");
@@ -332,6 +389,111 @@ export default function Inventory() {
     showToast(mode === "in" ? "Stock received" : mode === "out" ? "Stock issued" : "Stock adjusted");
     setMoveForm({ ...emptyMove, warehouse_id: moveForm.warehouse_id });
     await load();
+  };
+
+  const productNameById = (id) => products.find((p) => p.id === Number(id))?.name || `Product #${id}`;
+
+  const resetVariantForm = () => {
+    setEditingVariantId(null);
+    setVariantForm({ product_id: "", name: "", sku: "", barcode: "", price: "", cost: "", attributes: "" });
+  };
+
+  const saveVariantSku = async (event) => {
+    event.preventDefault();
+    if (!variantForm.product_id || !String(variantForm.name || "").trim()) {
+      showToast("Product and variant name are required");
+      return;
+    }
+    let attributes = {};
+    if (String(variantForm.attributes || "").trim()) {
+      try {
+        attributes = JSON.parse(variantForm.attributes);
+        if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) {
+          showToast("Attributes must be a JSON object");
+          return;
+        }
+      } catch {
+        showToast("Invalid attributes JSON");
+        return;
+      }
+    }
+    const result = await api.inventory.upsertVariantSku({
+      id: editingVariantId || undefined,
+      product_id: Number(variantForm.product_id),
+      name: variantForm.name.trim(),
+      sku: variantForm.sku || null,
+      barcode: variantForm.barcode || null,
+      price: variantForm.price === "" ? null : Number(variantForm.price),
+      cost: variantForm.cost === "" ? 0 : Number(variantForm.cost),
+      attributes,
+    });
+    if (!result?.success) {
+      showToast(result?.error || "Could not save variant SKU");
+      return;
+    }
+    showToast(editingVariantId ? "Variant updated" : "Variant created");
+    resetVariantForm();
+    await load();
+  };
+
+  const editVariantSku = (row) => {
+    setEditingVariantId(row.id);
+    setVariantForm({
+      product_id: String(row.product_id || ""),
+      name: row.name || "",
+      sku: row.sku || "",
+      barcode: row.barcode || "",
+      price: row.price == null ? "" : String(row.price),
+      cost: row.cost == null ? "" : String(row.cost),
+      attributes: row.attributes && typeof row.attributes === "object" ? JSON.stringify(row.attributes) : "",
+    });
+    switchTab("variants");
+  };
+
+  const submitSerials = async (event) => {
+    event.preventDefault();
+    const serials = String(serialForm.serial_numbers || "")
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!serialForm.product_id || !serials.length) {
+      showToast("Product and at least one serial are required");
+      return;
+    }
+    const result = await api.inventory.registerSerials({
+      product_id: Number(serialForm.product_id),
+      warehouse_id: serialForm.warehouse_id ? Number(serialForm.warehouse_id) : null,
+      serials,
+    });
+    if (!result?.success) {
+      showToast(result?.error || "Could not register serials");
+      return;
+    }
+    showToast(`Registered ${result.inserted || serials.length} serial(s)`);
+    setSerialForm({ product_id: "", warehouse_id: "", serial_numbers: "" });
+    await load();
+  };
+
+  const runLotPickPreview = async (event) => {
+    event.preventDefault();
+    if (!lotPickForm.product_id || !Number(lotPickForm.qty)) {
+      showToast("Product and quantity are required");
+      return;
+    }
+    const result = await api.inventory.previewLotPick({
+      product_id: Number(lotPickForm.product_id),
+      warehouse_id: lotPickForm.warehouse_id ? Number(lotPickForm.warehouse_id) : null,
+      qty: Number(lotPickForm.qty),
+      preference: lotPickForm.preference || "auto",
+    });
+    if (!result) {
+      showToast("Could not preview lot pick");
+      return;
+    }
+    setLotPickPreview(result);
+    if (result.shortfall > 0) {
+      showToast(`Shortfall of ${result.shortfall} — insufficient open lots`);
+    }
   };
 
   const quickAdjust = async (product, delta) => {
@@ -408,6 +570,16 @@ export default function Inventory() {
     }
     setWhForm({ name: "", code: "", branch_id: "", address: "" });
     showToast("Warehouse created");
+    await load();
+  };
+
+  const setMainWarehouse = async (wh) => {
+    const result = await api.warehouses.setMain(wh.id);
+    if (!result?.success) {
+      showToast(result?.error || "Could not set Main Store");
+      return;
+    }
+    showToast(`${wh.name} is now the Main Store`);
     await load();
   };
 
@@ -556,12 +728,27 @@ export default function Inventory() {
     }
   };
 
-  const variantRows = products.flatMap((product) =>
-    (product.variants || []).map((variant) => ({
-      ...variant,
-      product_id: product.id,
-      product_name: product.name,
-    }))
+  const variantRows = useMemo(() => {
+    if (ledgerVariants.length) {
+      return ledgerVariants.map((v) => ({
+        ...v,
+        product_name: productNameById(v.product_id),
+        source: "ledger",
+      }));
+    }
+    return products.flatMap((product) =>
+      (product.variants || []).map((variant) => ({
+        ...variant,
+        product_id: product.id,
+        product_name: product.name,
+        source: "json",
+      }))
+    );
+  }, [ledgerVariants, products]);
+
+  const selectedLedgerVariants = useMemo(
+    () => ledgerVariants.filter((v) => Number(v.product_id) === Number(moveForm.product_id) && v.active !== false),
+    [ledgerVariants, moveForm.product_id]
   );
 
   const reportRows = useMemo(() => {
@@ -597,9 +784,13 @@ export default function Inventory() {
           onChange={(e) => setMoveForm((f) => ({ ...f, variant_id: e.target.value }))}
         >
           <option value="">No variant</option>
-          {(selectedProduct?.variants || []).map((v) => (
+          {(selectedLedgerVariants.length
+            ? selectedLedgerVariants
+            : selectedProduct?.variants || []
+          ).map((v) => (
             <option key={v.id || v.name} value={v.id}>
               {v.name}
+              {v.sku ? ` (${v.sku})` : ""}
             </option>
           ))}
         </select>
@@ -643,6 +834,19 @@ export default function Inventory() {
           onChange={(e) => setMoveForm((f) => ({ ...f, expiry_date: e.target.value }))}
         />
       </Field>
+      {mode === "in" && (
+        <div className="md:col-span-3">
+          <Field label="Serial numbers (optional)">
+            <textarea
+              className={inputClass}
+              rows={2}
+              value={moveForm.serial_numbers}
+              onChange={(e) => setMoveForm((f) => ({ ...f, serial_numbers: e.target.value }))}
+              placeholder="One per line, or comma-separated — registered into serial ledger on receive"
+            />
+          </Field>
+        </div>
+      )}
       <div className="md:col-span-2">
         <Field label="Note">
           <input
@@ -1010,7 +1214,7 @@ export default function Inventory() {
           {tab === "transfers" && (
             <div className="space-y-5">
               {canEdit && (
-                <Panel title="Inter-warehouse / branch transfer">
+                <Panel title="Stock Transfer (Main Store ⇄ warehouse)">
                   <form onSubmit={submitTransfer} className="grid gap-3 md:grid-cols-5">
                     <div className="md:col-span-2">
                       <ProductSelector
@@ -1032,6 +1236,7 @@ export default function Inventory() {
                       {warehouses.map((w) => (
                         <option key={w.id} value={w.id}>
                           {w.name}
+                          {w.is_main ? " (Main Store)" : ""}
                         </option>
                       ))}
                     </select>
@@ -1045,6 +1250,7 @@ export default function Inventory() {
                       {warehouses.map((w) => (
                         <option key={w.id} value={w.id}>
                           {w.name}
+                          {w.is_main ? " (Main Store)" : ""}
                         </option>
                       ))}
                     </select>
@@ -1063,7 +1269,9 @@ export default function Inventory() {
                     </div>
                   </form>
                   <p className="mt-3 text-xs text-app-muted">
-                    Note: company stock is scalar on products; transfers are logged for audit. True per-warehouse balances are PARTIAL without a warehouse_stock ledger.
+                    Deducts from the source warehouse and adds to the destination in real time. Every transfer must touch
+                    the Main Store on one side — stock only ever reaches another warehouse/store this way, never directly
+                    from Purchases. Company-wide total stock is unchanged.
                   </p>
                 </Panel>
               )}
@@ -1255,6 +1463,11 @@ export default function Inventory() {
 
           {tab === "warehouses" && (
             <div className="space-y-5">
+              <div className="rounded-lg border border-app bg-app-panel-muted px-4 py-3 text-xs text-app-muted">
+                <strong className="text-app">Main Store</strong> is the central warehouse that receives every approved
+                purchase. Every other warehouse/store only ever gets stock via a Stock Transfer out of (or back into) the
+                Main Store — never directly from Purchases.
+              </div>
               {canCreate && (
                 <Panel title="Add warehouse">
                   <form onSubmit={saveWarehouse} className="grid gap-3 md:grid-cols-4">
@@ -1281,10 +1494,17 @@ export default function Inventory() {
                   const value = stock.reduce((s, r) => s + Number(r.value || 0), 0);
                   const branchName = branches.find((b) => b.id === wh.branch_id)?.name || "—";
                   return (
-                    <div key={wh.id} className="card">
+                    <div key={wh.id} className={`card ${wh.is_main ? "ring-2 ring-brand" : ""}`}>
                       <div className="mb-3 flex items-start justify-between">
                         <div>
-                          <div className="card-title">{wh.name}</div>
+                          <div className="card-title flex items-center gap-2">
+                            {wh.name}
+                            {wh.is_main && (
+                              <span className="rounded-full bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
+                                Main Store
+                              </span>
+                            )}
+                          </div>
                           <div className="text-xs text-app-muted">
                             {wh.code} · {branchName}
                           </div>
@@ -1303,6 +1523,15 @@ export default function Inventory() {
                           <div className="font-mono font-semibold">{money(value)}</div>
                         </div>
                       </div>
+                      {!wh.is_main && canSetMainWarehouse && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary mt-3 w-full"
+                          onClick={() => setMainWarehouse(wh)}
+                        >
+                          Set as Main Store
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -1402,36 +1631,355 @@ export default function Inventory() {
           )}
 
           {tab === "variants" && (
-            <Panel title="Product variants (JSON on products — PARTIAL)">
-              {variantRows.length === 0 ? (
-                <div className="text-sm text-app-muted">No variants yet. Add variants from the Products form (`variants` jsonb).</div>
-              ) : (
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-app text-left text-xs uppercase text-app-muted">
-                      <th className="py-2 pr-3">Product</th>
-                      <th className="py-2 pr-3">Variant</th>
-                      <th className="py-2 pr-3">SKU</th>
-                      <th className="py-2 pr-3">Barcode</th>
-                      <th className="py-2 pr-3">Price</th>
-                      <th className="py-2">Stock</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {variantRows.map((v) => (
-                      <tr key={`${v.product_id}-${v.id || v.name}`} className="border-t border-app text-sm">
-                        <td className="py-2 pr-3">{v.product_name}</td>
-                        <td className="py-2 pr-3 font-medium">{v.name}</td>
-                        <td className="py-2 pr-3 font-mono text-app-muted">{v.sku || "—"}</td>
-                        <td className="py-2 pr-3 font-mono text-app-muted">{v.barcode || "—"}</td>
-                        <td className="py-2 pr-3 font-mono">{money(v.price)}</td>
-                        <td className="py-2 font-mono">{v.stock}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="space-y-5">
+              {canProductEdit && (
+                <Panel title={editingVariantId ? "Edit variant SKU" : "Add variant SKU"}>
+                  <form onSubmit={saveVariantSku} className="grid gap-3 md:grid-cols-3">
+                    <Field label="Product">
+                      <ProductSelector
+                        products={products.filter((p) => !p.archived_at && !p.deleted_at)}
+                        value={variantForm.product_id}
+                        onChange={(productId) => setVariantForm((f) => ({ ...f, product_id: productId }))}
+                        placeholder="Select product…"
+                      />
+                    </Field>
+                    <Field label="Name">
+                      <input
+                        required
+                        className={inputClass}
+                        value={variantForm.name}
+                        onChange={(e) => setVariantForm((f) => ({ ...f, name: e.target.value }))}
+                        placeholder="e.g. Size M / Red"
+                      />
+                    </Field>
+                    <Field label="SKU">
+                      <input
+                        className={inputClass}
+                        value={variantForm.sku}
+                        onChange={(e) => setVariantForm((f) => ({ ...f, sku: e.target.value }))}
+                        placeholder="Optional unique SKU"
+                      />
+                    </Field>
+                    <Field label="Barcode">
+                      <input
+                        className={inputClass}
+                        value={variantForm.barcode}
+                        onChange={(e) => setVariantForm((f) => ({ ...f, barcode: e.target.value }))}
+                      />
+                    </Field>
+                    <Field label="Price">
+                      <input
+                        type="number"
+                        step="0.01"
+                        className={inputClass}
+                        value={variantForm.price}
+                        onChange={(e) => setVariantForm((f) => ({ ...f, price: e.target.value }))}
+                      />
+                    </Field>
+                    <Field label="Cost">
+                      <input
+                        type="number"
+                        step="0.01"
+                        className={inputClass}
+                        value={variantForm.cost}
+                        onChange={(e) => setVariantForm((f) => ({ ...f, cost: e.target.value }))}
+                      />
+                    </Field>
+                    <div className="md:col-span-3">
+                      <Field label='Attributes JSON (optional)'>
+                        <input
+                          className={inputClass}
+                          value={variantForm.attributes}
+                          onChange={(e) => setVariantForm((f) => ({ ...f, attributes: e.target.value }))}
+                          placeholder='{"size":"M","color":"Red"}'
+                        />
+                      </Field>
+                    </div>
+                    <div className="flex flex-wrap gap-2 md:col-span-3">
+                      <button type="submit" className="btn btn-primary">
+                        {editingVariantId ? "Update variant" : "Add variant"}
+                      </button>
+                      {editingVariantId && (
+                        <button type="button" className="btn btn-secondary" onClick={resetVariantForm}>
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  </form>
+                </Panel>
               )}
-            </Panel>
+              <Panel
+                title={`Variant SKU ledger (${variantRows.filter((v) => v.source === "ledger").length || variantRows.length})`}
+              >
+                {variantRows.length === 0 ? (
+                  <div className="text-sm text-app-muted">
+                    No variant SKUs yet. Create them here — products.variants JSON remains a denormalized cache.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-app text-left text-xs uppercase text-app-muted">
+                          <th className="py-2 pr-3">Product</th>
+                          <th className="py-2 pr-3">Variant</th>
+                          <th className="py-2 pr-3">SKU</th>
+                          <th className="py-2 pr-3">Barcode</th>
+                          <th className="py-2 pr-3">Price</th>
+                          <th className="py-2 pr-3">Cost</th>
+                          <th className="py-2 pr-3">Stock</th>
+                          <th className="py-2">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {variantRows.map((v) => (
+                          <tr key={`${v.source}-${v.product_id}-${v.id || v.name}`} className="border-t border-app text-sm">
+                            <td className="py-2 pr-3">{v.product_name}</td>
+                            <td className="py-2 pr-3 font-medium">{v.name}</td>
+                            <td className="py-2 pr-3 font-mono text-app-muted">{v.sku || "—"}</td>
+                            <td className="py-2 pr-3 font-mono text-app-muted">{v.barcode || "—"}</td>
+                            <td className="py-2 pr-3 font-mono">{money(v.price)}</td>
+                            <td className="py-2 pr-3 font-mono">{money(v.cost)}</td>
+                            <td className="py-2 pr-3 font-mono">{v.stock ?? "—"}</td>
+                            <td className="py-2">
+                              {v.source === "ledger" && canProductEdit && (
+                                <button type="button" className="btn btn-secondary" onClick={() => editVariantSku(v)}>
+                                  Edit
+                                </button>
+                              )}
+                              {v.source === "json" && (
+                                <span className="text-xs text-app-muted">JSON cache</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            </div>
+          )}
+
+          {tab === "serials" && (
+            <div className="space-y-5">
+              {canCreate && (
+                <Panel title="Register serial numbers">
+                  <form onSubmit={submitSerials} className="grid gap-3 md:grid-cols-3">
+                    <Field label="Product">
+                      <ProductSelector
+                        products={products.filter((p) => !p.archived_at && !p.deleted_at)}
+                        value={serialForm.product_id}
+                        onChange={(productId) => setSerialForm((f) => ({ ...f, product_id: productId }))}
+                        placeholder="Select product…"
+                      />
+                    </Field>
+                    <Field label="Warehouse">
+                      <select
+                        className={inputClass}
+                        value={serialForm.warehouse_id}
+                        onChange={(e) => setSerialForm((f) => ({ ...f, warehouse_id: e.target.value }))}
+                      >
+                        <option value="">Optional</option>
+                        {warehouses.filter((w) => w.active !== false).map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <div className="md:col-span-3">
+                      <Field label="Serial numbers">
+                        <textarea
+                          required
+                          className={inputClass}
+                          rows={3}
+                          value={serialForm.serial_numbers}
+                          onChange={(e) => setSerialForm((f) => ({ ...f, serial_numbers: e.target.value }))}
+                          placeholder="One per line, or comma-separated"
+                        />
+                      </Field>
+                    </div>
+                    <div className="md:col-span-3">
+                      <button type="submit" className="btn btn-primary">
+                        Register serials
+                      </button>
+                    </div>
+                  </form>
+                </Panel>
+              )}
+              <Panel title={`Serial ledger (${serialRows.length})`}>
+                {serialRows.length === 0 ? (
+                  <div className="text-sm text-app-muted">
+                    No serials registered. Add them here or include serials when receiving stock.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-app text-left text-xs uppercase text-app-muted">
+                          <th className="py-2 pr-3">Serial</th>
+                          <th className="py-2 pr-3">Product</th>
+                          <th className="py-2 pr-3">Status</th>
+                          <th className="py-2 pr-3">Warehouse</th>
+                          <th className="py-2">Received</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {serialRows.map((s) => (
+                          <tr key={s.id} className="border-t border-app">
+                            <td className="py-2 pr-3 font-mono font-medium">{s.serial_number}</td>
+                            <td className="py-2 pr-3">{productNameById(s.product_id)}</td>
+                            <td className="py-2 pr-3 capitalize">{s.status || "—"}</td>
+                            <td className="py-2 pr-3 text-app-muted">
+                              {warehouses.find((w) => w.id === Number(s.warehouse_id))?.name || "—"}
+                            </td>
+                            <td className="py-2 text-app-muted">
+                              {s.received_at ? new Date(s.received_at).toLocaleString() : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            </div>
+          )}
+
+          {tab === "lots" && (
+            <div className="space-y-5">
+              <Panel title="FIFO / FEFO pick preview">
+                <form onSubmit={runLotPickPreview} className="grid gap-3 md:grid-cols-4">
+                  <Field label="Product">
+                    <ProductSelector
+                      products={products.filter((p) => !p.archived_at && !p.deleted_at)}
+                      value={lotPickForm.product_id}
+                      onChange={(productId) => setLotPickForm((f) => ({ ...f, product_id: productId }))}
+                      placeholder="Select product…"
+                    />
+                  </Field>
+                  <Field label="Warehouse">
+                    <select
+                      className={inputClass}
+                      value={lotPickForm.warehouse_id}
+                      onChange={(e) => setLotPickForm((f) => ({ ...f, warehouse_id: e.target.value }))}
+                    >
+                      <option value="">All warehouses</option>
+                      {warehouses.filter((w) => w.active !== false).map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Qty to pick">
+                    <input
+                      type="number"
+                      min={1}
+                      className={inputClass}
+                      value={lotPickForm.qty}
+                      onChange={(e) => setLotPickForm((f) => ({ ...f, qty: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Preference">
+                    <select
+                      className={inputClass}
+                      value={lotPickForm.preference}
+                      onChange={(e) => setLotPickForm((f) => ({ ...f, preference: e.target.value }))}
+                    >
+                      <option value="auto">Auto (product setting)</option>
+                      <option value="fifo">FIFO</option>
+                      <option value="fefo">FEFO</option>
+                    </select>
+                  </Field>
+                  <div className="md:col-span-4">
+                    <button type="submit" className="btn btn-primary">
+                      Preview auto-pick
+                    </button>
+                  </div>
+                </form>
+                {lotPickPreview && (
+                  <div className="mt-4 space-y-2">
+                    <div className="text-sm text-app-muted">
+                      Mode: <span className="font-medium uppercase text-app">{lotPickPreview.preference}</span>
+                      {lotPickPreview.shortfall > 0
+                        ? ` · Shortfall ${lotPickPreview.shortfall}`
+                        : " · Fully covered"}
+                    </div>
+                    {(lotPickPreview.plan || []).length === 0 ? (
+                      <div className="text-sm text-app-muted">No open lots for this product.</div>
+                    ) : (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-app text-left text-xs uppercase text-app-muted">
+                            <th className="py-2 pr-3">Lot</th>
+                            <th className="py-2 pr-3">Batch</th>
+                            <th className="py-2 pr-3">Expiry</th>
+                            <th className="py-2 pr-3">Received</th>
+                            <th className="py-2 pr-3">Pick qty</th>
+                            <th className="py-2">Unit cost</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {lotPickPreview.plan.map((p) => (
+                            <tr key={p.lot_id} className="border-t border-app">
+                              <td className="py-2 pr-3 font-mono">#{p.lot_id}</td>
+                              <td className="py-2 pr-3">{p.batch_number || "—"}</td>
+                              <td className="py-2 pr-3">{p.expiry_date || "—"}</td>
+                              <td className="py-2 pr-3 text-app-muted">
+                                {p.received_at ? new Date(p.received_at).toLocaleDateString() : "—"}
+                              </td>
+                              <td className="py-2 pr-3 font-mono">{p.qty}</td>
+                              <td className="py-2 font-mono">{money(p.unit_cost)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
+              </Panel>
+              <Panel title={`Open lots (${openLots.length})`}>
+                {openLots.length === 0 ? (
+                  <div className="text-sm text-app-muted">
+                    No open lots. Stock in / purchase receive creates lots automatically (migration 019).
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-app text-left text-xs uppercase text-app-muted">
+                          <th className="py-2 pr-3">Lot</th>
+                          <th className="py-2 pr-3">Product</th>
+                          <th className="py-2 pr-3">Batch</th>
+                          <th className="py-2 pr-3">Remaining</th>
+                          <th className="py-2 pr-3">Received</th>
+                          <th className="py-2 pr-3">Expiry</th>
+                          <th className="py-2">Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {openLots.map((lot) => (
+                          <tr key={lot.id} className="border-t border-app">
+                            <td className="py-2 pr-3 font-mono">#{lot.id}</td>
+                            <td className="py-2 pr-3">{productNameById(lot.product_id)}</td>
+                            <td className="py-2 pr-3">{lot.batch_number || "—"}</td>
+                            <td className="py-2 pr-3 font-mono">
+                              {lot.qty_remaining} / {lot.qty_received}
+                            </td>
+                            <td className="py-2 pr-3 text-app-muted">
+                              {lot.received_at ? new Date(lot.received_at).toLocaleDateString() : "—"}
+                            </td>
+                            <td className="py-2 pr-3">{lot.expiry_date || "—"}</td>
+                            <td className="py-2 font-mono">{money(lot.unit_cost)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            </div>
           )}
 
           {tab === "reports" && (

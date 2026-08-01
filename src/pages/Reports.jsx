@@ -1,11 +1,13 @@
-import { useState, useEffect } from "react";
+import { lazy, Suspense, useState, useEffect } from "react";
 import { AlertTriangle } from "lucide-react";
 import {
   BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
 import { api } from "../lib/api";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
-import ReportsAnalytics from "./ReportsAnalytics";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
+
+const ReportsAnalytics = lazy(() => import("./ReportsAnalytics"));
 const PIE_COLORS = ["var(--chart-1)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--chart-2)", "var(--chart-6)"];
 
 const TABS = [
@@ -34,21 +36,40 @@ function LegacyReports() {
   const [lowStock, setLowStock] = useState([]);
   const [customerReport, setCustomerReport] = useState([]);
   const [supplierReport, setSupplierReport] = useState([]);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // ERP real-time: refresh every legacy report tab automatically.
+  useRealtimeRefresh(
+    ["sales", "purchases", "inventory", "expenses", "customers", "suppliers"],
+    () => setRefreshTick((n) => n + 1),
+    { debounceMs: 1200 }
+  );
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      setLoading(true);
-      const [re, tp, cs, ps, sr, pr, plr, inv, ls, cr, sup] = await Promise.all([
-        api.reports.getRevenueVsExpenses(), api.reports.getTopProducts(5), api.reports.getCategorySales(), api.reports.getProfitSummary(),
-        api.reports.getSalesReport({}), api.reports.getPurchaseReport({}), api.reports.getProfitLoss({}),
-        api.reports.getInventoryReport(), api.reports.getLowStockReport(), api.reports.getCustomerReport(), api.reports.getSupplierReport(),
+      setLoading(refreshTick === 0);
+      // Drop duplicate profit endpoints from the initial fan-out (getProfitLoss === getProfitSummary).
+      const [re, tp, cs, ps, sr, pr, inv, ls, cr, sup] = await Promise.all([
+        api.reports.getRevenueVsExpenses(),
+        api.reports.getTopProducts(5),
+        api.reports.getCategorySales(),
+        api.reports.getProfitSummary(),
+        api.reports.getSalesReport({}),
+        api.reports.getPurchaseReport({}),
+        api.reports.getInventoryReport(),
+        api.reports.getLowStockReport(),
+        api.reports.getCustomerReport(),
+        api.reports.getSupplierReport(),
       ]);
+      if (cancelled) return;
       setRevExp(re); setTopProducts(tp); setCategorySales(cs); setProfit(ps);
-      setSalesReport(sr); setPurchaseReport(pr); setPl(plr); setInventory(inv); setLowStock(ls);
+      setSalesReport(sr); setPurchaseReport(pr); setPl(ps); setInventory(inv); setLowStock(ls);
       setCustomerReport(cr); setSupplierReport(sup);
       setLoading(false);
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [refreshTick]);
 
   return (
     <div className="animate-fadein">
@@ -289,7 +310,9 @@ export default function Reports() {
         <button type="button" onClick={() => setWorkspace("analytics")} className={workspace === "analytics" ? "is-active" : ""}>Analytics Dashboard</button>
         <button type="button" onClick={() => setWorkspace("legacy")} className={workspace === "legacy" ? "is-active" : ""}>Operational Reports</button>
       </div>
-      {workspace === "analytics" ? <ReportsAnalytics /> : <LegacyReports />}
+      <Suspense fallback={<div className="card p-10 text-center text-sm text-app-muted">Loading reports…</div>}>
+        {workspace === "analytics" ? <ReportsAnalytics /> : <LegacyReports />}
+      </Suspense>
     </div>
   );
 }

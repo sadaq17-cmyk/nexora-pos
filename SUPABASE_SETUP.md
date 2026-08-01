@@ -4,7 +4,7 @@ Nexora POS uses **Supabase Auth** as the only source of truth for login, signup,
 
 This guide is written for a non-developer operator. Follow the steps in order.
 
-**Live site:** `https://www.httpsnexorapos.com`
+**Live site:** `https://www.nexorapospro.com`
 
 ---
 
@@ -57,13 +57,13 @@ Also keep the existing email key:
 1. Supabase Dashboard → **Authentication → URL Configuration**.
 2. Set **Site URL** to:
 
-   `https://www.httpsnexorapos.com`
+   `https://www.nexorapospro.com`
 
 3. Add these **Redirect URLs**:
 
-   - `https://www.httpsnexorapos.com/verify-email`
-   - `https://www.httpsnexorapos.com/reset-password`
-   - `https://www.httpsnexorapos.com/**` (optional catch-all if your Supabase plan allows wildcards)
+   - `https://www.nexorapospro.com/verify-email`
+   - `https://www.nexorapospro.com/reset-password`
+   - `https://www.nexorapospro.com/**` (optional catch-all if your Supabase plan allows wildcards)
 
 ---
 
@@ -80,10 +80,10 @@ Supabase sends its own confirmation and password-reset emails. Point Supabase SM
    | Port | `465` (or `587` if your UI prefers STARTTLS) |
    | Username | `resend` |
    | Password | your **Resend API key** (same family of key as `RESEND_API_KEY`) |
-   | Sender email | `noreply@httpsnexorapos.com` |
+   | Sender email | `noreply@nexorapospro.com` |
    | Sender name | `Nexora POS` |
 
-3. Save. Your Resend domain (`httpsnexorapos.com`) must already be verified — see `EMAIL_SETUP.md`.
+3. Save. Your Resend domain (`nexorapospro.com`) must already be verified — see `EMAIL_SETUP.md`.
 
 **Note:** Admin password resets and “password changed” notifications still use `/api/send-email` + `RESEND_API_KEY` (unchanged). Signup confirmation and forgot-password emails come from Supabase’s mailer once SMTP is set.
 

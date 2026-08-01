@@ -1,7 +1,7 @@
 # Nexora POS Enterprise — Final E2E Verification
 
 **Date:** 2026-07-20T15:41:53.530Z
-**Production URL:** https://www.httpsnexorapos.com
+**Production URL:** https://www.nexorapospro.com
 **Verdict:** **NOT FINAL FULL GO**
 
 ## Asset hashes

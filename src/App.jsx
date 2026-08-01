@@ -4,11 +4,12 @@ import { AuthProvider } from "./context/AuthContext";
 import { ToastProvider } from "./context/ToastContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import RouteErrorBoundary from "./components/RouteErrorBoundary";
-import Layout from "./components/Layout";
-import PublicLayout from "./components/public/PublicLayout";
 import { ThemeProvider } from "./context/ThemeContext";
 import { EnterpriseSettingsProvider } from "./context/EnterpriseSettingsContext";
 import { useHashRouter } from "./lib/desktopRuntime";
+
+const Layout = lazy(() => import("./components/Layout"));
+const PublicLayout = lazy(() => import("./components/public/PublicLayout"));
 
 const Login = lazy(() => import("./pages/Login"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
@@ -90,7 +91,13 @@ export default function App() {
             <Router>
               <Suspense fallback={<RouteFallback />}>
                 <Routes>
-                  <Route element={<PublicLayout />}>
+                  <Route
+                    element={
+                      <RouteErrorBoundary>
+                        <PublicLayout />
+                      </RouteErrorBoundary>
+                    }
+                  >
                     <Route path="/" element={<Home />} />
                     <Route path="/features" element={<Features />} />
                     <Route path="/pricing" element={<Pricing />} />

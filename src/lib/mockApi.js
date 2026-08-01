@@ -74,7 +74,7 @@ const DEMO_USERS = [
   { id: 6, name: "Sadiq", username: "sadik", email: "sadik@nexora.demo", password: "NexoraDemo123!", pin: "2222", role: "cashier", active: 1, branch_id: 1 },
   { id: 7, name: "David Kamau", username: "accountant", email: "accountant@nexora.demo", password: "NexoraDemo123!", pin: "7777", role: "accountant", active: 1, branch_id: 1 },
   // DEV-only mock credentials — never reuse production passwords here.
-  { id: 8, name: "Platform Super Admin", username: "SuperAdmin", email: "platform.owner@nexora.demo", password: "DemoOnly!ChangeMe1", pin: "0001", role: "platform_owner", active: 1, branch_id: null, company_id: null },
+  { id: 8, name: "Platform Super Admin", username: "SuperAdmin", email: "support@httpsnexorapos.com", password: "DemoOnly!ChangeMe1", pin: "0001", role: "platform_owner", active: 1, branch_id: null, company_id: null },
   { id: 9, name: "Nexora Company Owner", username: "companyowner", email: "companyowner@nexora.demo", password: "DemoOnly!ChangeMe2", pin: "0002", role: "owner", active: 1, branch_id: 1, company_id: 1 },
   { id: 10, name: "Honest Company Owner", username: "Owner@Honest", email: "owner.demo@nexora.demo", password: "DemoOnly!ChangeMe3", pin: "8888", role: "owner", active: 1, branch_id: 1, company_id: 1 },
 ];

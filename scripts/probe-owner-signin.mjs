@@ -1,12 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
 
-const html = await (await fetch("https://www.httpsnexorapos.com/login")).text();
+const html = await (await fetch("https://www.nexorapospro.com/login")).text();
 const bundleMatch = html.match(/\/assets\/index-[^"]+\.js/);
 if (!bundleMatch) {
   console.log(JSON.stringify({ ok: false, error: "bundle not found" }));
   process.exit(1);
 }
-const js = await (await fetch(`https://www.httpsnexorapos.com${bundleMatch[0]}`)).text();
+const js = await (await fetch(`https://www.nexorapospro.com${bundleMatch[0]}`)).text();
 const url = (js.match(/https:\/\/[a-z0-9]+\.supabase\.co/) || [])[0];
 const anon = (js.match(/eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/) || [])[0];
 if (!url || !anon) {

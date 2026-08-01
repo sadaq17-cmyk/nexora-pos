@@ -1,4 +1,6 @@
 const { contextBridge } = require('electron');
 
-// Minimal safe bridge — no Node APIs exposed to the renderer.
-contextBridge.exposeInMainWorld('nexoraDesktop', {});
+contextBridge.exposeInMainWorld('nexoraDesktop', {
+  isDesktop: true,
+  apiOrigin: 'https://www.nexorapospro.com',
+});

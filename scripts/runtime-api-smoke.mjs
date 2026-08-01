@@ -168,6 +168,47 @@ try {
     await api.owner[key]();
   });
 
+  await check("company management lifecycle (platform_owner)", async () => {
+    if (api.__setAuthContext) {
+      api.__setAuthContext({
+        id: "u-platform",
+        name: "Platform",
+        username: "superadmin",
+        email: "platform@test.local",
+        role: "platform_owner",
+        company_id: null,
+        active: 1,
+      });
+    }
+    const overview = await api.owner.getOverview();
+    if (!overview?.success || !Array.isArray(overview.companies)) {
+      throw new Error("getOverview must return companies for Super Owner");
+    }
+    const company = overview.companies[0];
+    if (!company?.id) throw new Error("expected at least one company");
+    for (const method of ["markPaid", "extendTrial", "extendSubscription", "getCompanyHistory", "activateCompany", "suspendCompany"]) {
+      if (typeof api.owner[method] !== "function") throw new Error(`missing owner.${method}`);
+    }
+    const history = await api.owner.getCompanyHistory(company.id);
+    if (!history?.success || Number(history.company_id) !== Number(company.id)) {
+      throw new Error("getCompanyHistory must be scoped to company_id");
+    }
+    // Restore tenant owner context for remaining checks
+    if (api.__setAuthContext) {
+      api.__setAuthContext({
+        id: "u-owner",
+        name: "Owner",
+        username: "owner",
+        email: "owner@test.local",
+        role: "owner",
+        company_id: 1,
+        branch_id: 1,
+        company: { id: 1, name: "Nexora", code: "NEXORA001", status: "active" },
+        active: 1,
+      });
+    }
+  });
+
   await check("platformPublic.getPlans", async () => {
     const plans = await api.platformPublic.getPlans();
     if (!Array.isArray(plans)) throw new Error("expected plans array");
@@ -193,5 +234,10 @@ try {
     process.exitCode = 1;
   }
 } finally {
-  await server.close();
+  await Promise.race([
+    server.close(),
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]);
+  // Vite SSR middleware can keep the event loop alive after close().
+  process.exit(fails.length ? 1 : 0);
 }

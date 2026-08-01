@@ -19,7 +19,7 @@ const onlineUrl = buildInvoiceQrPayload({
   receiptNo,
   online: true,
 });
-if (!onlineUrl.startsWith("https://www.httpsnexorapos.com/invoice/4567")) {
+if (!onlineUrl.startsWith("https://www.nexorapospro.com/invoice/4567")) {
   throw new Error(`Unexpected online QR payload: ${onlineUrl}`);
 }
 

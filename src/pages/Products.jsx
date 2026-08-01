@@ -7,6 +7,7 @@ import { useToast } from "../context/ToastContext";
 import { useEnterpriseSettings } from "../context/EnterpriseSettingsContext";
 import { readSecureImageDataUrl } from "../lib/secureImageUpload";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { useRealtimeRefresh } from "../hooks/useRealtimeRefresh";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { DEFAULT_PAGE_SIZE } from "../lib/requestCache";
 
@@ -21,6 +22,7 @@ const emptyForm = {
   price: "",
   cost: "",
   wholesale_price: "",
+  min_selling_price: "",
   discount_percent: "",
   tax_inclusive: false,
   stock: "",
@@ -72,6 +74,10 @@ export default function Products() {
     load();
   }, []);
 
+  // ERP real-time: a purchase, sale, or stock adjustment anywhere in the
+  // company must refresh this product list automatically.
+  useRealtimeRefresh(["products", "inventory", "purchases", "sales"], load);
+
   const filtered = useMemo(() => {
     const q = debouncedSearch.toLowerCase().trim();
     if (!q) return products;
@@ -109,6 +115,9 @@ export default function Products() {
       price: p.price,
       cost: p.cost,
       wholesale_price: p.wholesale_price ?? "",
+      min_selling_price: p.min_selling_price ?? "",
+      avg_cost: p.avg_cost ?? "",
+      last_cost: p.last_cost ?? "",
       discount_percent: p.discount_percent ?? "",
       tax_inclusive: !!p.tax_inclusive,
       stock: p.stock,
@@ -163,6 +172,14 @@ export default function Products() {
       showToast("Product name is required");
       return;
     }
+    if (form.cost === "" || parseFloat(form.cost) < 0) {
+      showToast("Cost Price is required and cannot be negative");
+      return;
+    }
+    if (form.price === "" || parseFloat(form.price) <= 0) {
+      showToast("Selling Price is required and must be greater than zero");
+      return;
+    }
     const selectedUnit = units.find((u) => u.id === Number(form.unit_id));
     const payload = {
       name: form.name.trim(),
@@ -174,6 +191,7 @@ export default function Products() {
       price: parseFloat(form.price) || 0,
       cost: parseFloat(form.cost) || 0,
       wholesale_price: parseFloat(form.wholesale_price) || 0,
+      min_selling_price: parseFloat(form.min_selling_price) || 0,
       discount_percent: parseFloat(form.discount_percent) || 0,
       tax_inclusive: !!form.tax_inclusive,
       stock: parseInt(form.stock, 10) || 0,
@@ -292,10 +310,10 @@ export default function Products() {
           <table className="w-full">
             <thead>
               <tr className="bg-app-panel-muted">
-                {["Product", "Brand", "Barcode", "Category", "Cost", "Price", "Stock", "Status", "Actions"].map((h, i) => (
+                {["Product", "Brand", "Barcode", "Category", "Cost", "Price", "Margin", "Stock", "Status", "Actions"].map((h, i) => (
                   <th
                     key={h}
-                    className={`px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-app-muted ${i >= 4 && i <= 6 ? "text-right" : i === 8 ? "text-right" : "text-left"}`}
+                    className={`px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-app-muted ${i >= 4 && i <= 7 ? "text-right" : i === 9 ? "text-right" : "text-left"}`}
                   >
                     {h}
                   </th>
@@ -328,6 +346,9 @@ export default function Products() {
                   <td className="px-4 py-3 text-sm text-app-text">{p.category || "Uncategorized"}</td>
                   <td className="px-4 py-3 text-right font-mono text-sm text-app-text">{money(p.cost)}</td>
                   <td className="px-4 py-3 text-right font-mono text-sm font-medium text-app-text">{money(p.price)}</td>
+                  <td className="px-4 py-3 text-right font-mono text-sm text-app-muted">
+                    {Number(p.price) > 0 ? `${(((Number(p.price) - Number(p.cost)) / Number(p.price)) * 100).toFixed(1)}%` : "—"}
+                  </td>
                   <td className="px-4 py-3 text-right font-mono text-sm text-app-text">
                     {p.stock} {p.unit}
                   </td>
@@ -449,20 +470,57 @@ export default function Products() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="form-label">Cost ({currency.code} {currency.symbol})</label>
-                  <input type="number" step="0.01" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
+                  <label className="form-label">Cost price — used by Purchases ({currency.code} {currency.symbol}) *</label>
+                  <input required type="number" step="0.01" min="0" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
                 </div>
                 <div>
-                  <label className="form-label">Selling price ({currency.code} {currency.symbol})</label>
-                  <input required type="number" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
-                </div>
-                <div>
-                  <label className="form-label">Wholesale</label>
-                  <input type="number" step="0.01" value={form.wholesale_price} onChange={(e) => setForm({ ...form, wholesale_price: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
+                  <label className="form-label">Selling price — used by Sales/POS ({currency.code} {currency.symbol}) *</label>
+                  <input required type="number" step="0.01" min="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
                 </div>
               </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="form-label">Wholesale price (optional)</label>
+                  <input type="number" step="0.01" value={form.wholesale_price} onChange={(e) => setForm({ ...form, wholesale_price: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="form-label">Minimum selling price (optional)</label>
+                  <input type="number" step="0.01" value={form.min_selling_price} onChange={(e) => setForm({ ...form, min_selling_price: e.target.value })} className="w-full rounded-lg border border-app px-3 py-2 text-sm" placeholder="Floor price for discounts" />
+                </div>
+                <div>
+                  <label className="form-label">Profit margin</label>
+                  <div className="flex h-[38px] items-center rounded-lg border border-app bg-app-panel-muted px-3 text-sm font-medium text-app-text">
+                    {(() => {
+                      const c = parseFloat(form.cost) || 0;
+                      const s = parseFloat(form.price) || 0;
+                      const margin = s > 0 ? ((s - c) / s) * 100 : 0;
+                      return `${margin.toFixed(1)}%`;
+                    })()}
+                  </div>
+                </div>
+              </div>
+
+              {editingId && (
+                <div className="grid grid-cols-3 gap-3 rounded-lg bg-app-panel-muted p-3 text-xs text-app-muted">
+                  <div>
+                    <div className="uppercase tracking-wide">Average cost</div>
+                    <div className="mt-0.5 font-mono text-sm text-app-text">{money(form.avg_cost || 0)}</div>
+                  </div>
+                  <div>
+                    <div className="uppercase tracking-wide">Last purchase cost</div>
+                    <div className="mt-0.5 font-mono text-sm text-app-text">{money(form.last_cost || 0)}</div>
+                  </div>
+                  <div>
+                    <div className="uppercase tracking-wide">Inventory value</div>
+                    <div className="mt-0.5 font-mono text-sm text-app-text">
+                      {money((parseFloat(form.stock) || 0) * (parseFloat(form.avg_cost || form.cost) || 0))}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-3 gap-3">
                 <div>
