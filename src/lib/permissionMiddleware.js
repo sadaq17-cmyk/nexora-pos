@@ -76,7 +76,9 @@ export const API_PERMISSION_MAP = {
   "purchases.create": ["purchases", "create", "result"],
   "purchases.update": ["purchases", "edit", "result"],
   "purchases.duplicate": ["purchases", "create", "result"],
-  /** Receive stock — maps to purchases.approve (not edit). */
+  /** Approve PO — was missing from map; server gate denied unmapped *.approve as FORBIDDEN. */
+  "purchases.approve": ["purchases", "approve", "result"],
+  /** Receive stock — requires purchases.approve (same as approve policy). */
   "purchases.receive": ["purchases", "approve", "result"],
   "purchases.addPayment": ["purchases", "edit", "result"],
   "purchases.cancel": ["purchases", "edit", "result"],
