@@ -14,10 +14,10 @@ import {
 import Seo from "../../components/public/Seo";
 
 // Must exactly match the asset filename attached to the GitHub release
-// (verify with: gh release view v1.0.0 --repo sadaq17-cmyk/nexora-pos --json assets)
-const INSTALLER_LABEL = "Nexora-POS-Setup-1.0.0.exe";
+// (verify with: gh release view v1.0.1 --repo sadaq17-cmyk/nexora-pos --json assets)
+const INSTALLER_LABEL = "Nexora-POS-Setup-1.0.1.exe";
 const INSTALLER_HREF =
-  `https://github.com/sadaq17-cmyk/nexora-pos/releases/download/v1.0.0/${INSTALLER_LABEL}`;
+  `https://github.com/sadaq17-cmyk/nexora-pos/releases/download/v1.0.1/${INSTALLER_LABEL}`;
 
 const FEATURES = [
   { title: "Offline Mode", text: "Keep selling when the network drops.", icon: WifiOff },
@@ -75,7 +75,7 @@ export default function Download() {
               </div>
               <div>
                 <dt>Version</dt>
-                <dd>1.0.0</dd>
+                <dd>1.0.1</dd>
               </div>
             </dl>
           </div>

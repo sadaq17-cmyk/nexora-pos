@@ -67,6 +67,6 @@ run(node, [
 ]);
 
 console.log("\nbuild-electron-win: DONE");
-console.log("  release/dist/Nexora-POS-Setup-1.0.0.exe");
-console.log("  release/dist/Nexora-POS-Portable-1.0.0.exe");
+console.log("  release/dist/Nexora-POS-Setup-1.0.1.exe");
+console.log("  release/dist/Nexora-POS-Portable-1.0.1.exe");
 console.log("Supabase host baked:", supabase.meta.urlHost);

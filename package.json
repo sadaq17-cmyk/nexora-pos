@@ -1,6 +1,6 @@
 {
   "name": "nexora-pos-enterprise",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "electron/main.cjs",
   "description": "Nexora POS Pro — production web application for retail POS, inventory, and reporting",
@@ -40,6 +40,7 @@
     "electron:verify": "node scripts/verify-electron-desktop.mjs",
     "electron:verify:packaged": "node scripts/verify-packaged-exe.mjs",
     "electron:verify:login-config": "node scripts/verify-packaged-supabase.mjs",
+    "electron:verify:public": "node scripts/verify-public-install-supabase.mjs",
     "electron:verify:api": "node scripts/probe-electron-api-auth.mjs",
     "electron:e2e": "node scripts/e2e-electron-full.mjs"
   },
