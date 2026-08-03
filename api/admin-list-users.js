@@ -3,6 +3,7 @@ import {
   consumeRateLimit,
   createAdminClient,
   getClientIp,
+  beginApiRequest,
   isAllowedOrigin,
   verifyCallerFromRequest,
   safeUserFields,
@@ -103,9 +104,7 @@ function enrichWithProfile(authSafe, profile) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "GET" && req.method !== "POST") return methodNotAllowed(res, "GET, POST");
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["GET", "POST"] })) return;
 
   const verified = await verifyCallerFromRequest(req);
   if (verified.error) return jsonError(res, verified.status, verified.error);

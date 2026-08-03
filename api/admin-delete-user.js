@@ -1,6 +1,7 @@
 import {
   applySecurityHeaders,
   createAdminClient,
+  beginApiRequest,
   isAllowedOrigin,
   verifyCallerFromRequest,
   parseBody,
@@ -15,11 +16,7 @@ import {
 } from "./_authHelpers.js";
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST" && req.method !== "DELETE") {
-    return methodNotAllowed(res, "POST, DELETE");
-  }
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST", "DELETE"] })) return;
 
   const verified = await verifyCallerFromRequest(req);
   if (verified.error) return jsonError(res, verified.status, verified.error);

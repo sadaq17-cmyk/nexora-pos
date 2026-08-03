@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Banknote, Save, Download, Upload, RefreshCw,
-  Cloud, CloudOff, Printer, Shield, Coins,
+  Cloud, CloudOff, Printer, Shield, Coins, Zap,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -20,6 +20,7 @@ import {
   getDefaultCurrencyForCountry,
 } from "../lib/currency";
 import { isPaymentMethodEnabled, PAYMENT_METHODS } from "../lib/paymentMethods";
+import { AUTO_ACTION_DEFAULTS, AUTO_ACTION_META, normalizeAutoActions } from "../lib/autoActions";
 
 const BASE_TABS = [
   { id: "store", label: "Store Info" },
@@ -28,6 +29,7 @@ const BASE_TABS = [
   { id: "currencies", label: "Currencies", icon: Coins },
   { id: "receipt", label: "Receipt & Barcode" },
   { id: "printer", label: "Printer" },
+  { id: "auto_actions", label: "Auto Actions", icon: Zap },
   { id: "security", label: "Security" },
   { id: "permissions", label: "Roles & Permissions" },
   { id: "backup", label: "Backup & Sync" },
@@ -41,6 +43,7 @@ const VALID_TABS = new Set([
   "currencies",
   "receipt",
   "printer",
+  "auto_actions",
   "security",
   "permissions",
   "backup",
@@ -181,7 +184,17 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    if (tab === "printer") api.settings.getPrinters().then(setPrinters);
+    if (tab !== "printer") return;
+    (async () => {
+      if (typeof window !== "undefined" && window.nexoraDesktop?.getPrinters) {
+        const listed = await window.nexoraDesktop.getPrinters().catch(() => []);
+        if (Array.isArray(listed) && listed.length) {
+          setPrinters(listed);
+          return;
+        }
+      }
+      setPrinters(await api.settings.getPrinters().catch(() => []));
+    })();
   }, [tab]);
 
   const set = (key, value) => setSettings((s) => ({ ...s, [key]: value }));
@@ -529,6 +542,68 @@ export default function Settings() {
               )}
               <button type="button" onClick={() => saveSettings(["printer_name"])} className={saveBtn}>
                 <Save size={15} /> Save Changes
+              </button>
+            </div>
+          )}
+
+          {tab === "auto_actions" && (
+            <div className="space-y-4">
+              <div className="mb-1 flex items-center gap-2 text-sm text-app-muted">
+                <Zap size={15} /> One-click Credit Sale automation
+              </div>
+              <p className="text-xs text-app-muted">
+                When the cashier selects Credit and clicks Complete Sale, these steps run automatically —
+                no extra confirmations.
+              </p>
+              {AUTO_ACTION_META.map((item) => {
+                const flags = normalizeAutoActions(settings);
+                const on = flags[item.key];
+                return (
+                  <div
+                    key={item.key}
+                    className="flex items-start justify-between gap-3 rounded-control border border-app p-3"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-app-text">{item.label}</div>
+                      <div className="mt-0.5 text-xs text-app-muted">{item.description}</div>
+                    </div>
+                    <Toggle
+                      on={on}
+                      onClick={() => {
+                        const next = { ...normalizeAutoActions(settings), [item.key]: !on };
+                        setMany({
+                          auto_actions: next,
+                          ...Object.fromEntries(
+                            Object.keys(AUTO_ACTION_DEFAULTS).map((k) => [k, next[k] ? "true" : "false"])
+                          ),
+                        });
+                      }}
+                    />
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={async () => {
+                  const flags = normalizeAutoActions(settings);
+                  const payload = {
+                    auto_actions: flags,
+                    ...Object.fromEntries(
+                      Object.keys(AUTO_ACTION_DEFAULTS).map((k) => [k, flags[k] ? "true" : "false"])
+                    ),
+                  };
+                  const result = await api.settings.update(payload);
+                  if (result.success) {
+                    window.dispatchEvent(new CustomEvent("nexora:settings-updated", { detail: { settings: payload } }));
+                    showToast("Auto Actions saved");
+                    await load();
+                  } else {
+                    showToast(result.error || "Could not save Auto Actions");
+                  }
+                }}
+                className={saveBtn}
+              >
+                <Save size={15} /> Save Auto Actions
               </button>
             </div>
           )}

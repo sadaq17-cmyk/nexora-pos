@@ -41,6 +41,8 @@ import ProductSelector from "../components/ProductSelector";
 import { excludeDemoProducts } from "../lib/demoProducts";
 import { resolveReceiptNumber } from "../lib/receiptCodes";
 import { isCategoryActive, resolveCategoryIcon } from "../lib/categoryIcons";
+import { normalizeAutoActions } from "../lib/autoActions";
+import { openReceiptPdfPreview } from "../lib/receiptPdf";
 
 const CATEGORY_COLORS = {
   Groceries: "#2563eb",
@@ -107,6 +109,8 @@ export default function POS() {
   const [cardBrand, setCardBrand] = useState("VISA");
   const [paymentRef, setPaymentRef] = useState("");
   const [cashTendered, setCashTendered] = useState("");
+  const [mixedCashAmount, setMixedCashAmount] = useState("");
+  const [creditWarning, setCreditWarning] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [lastSale, setLastSale] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -272,7 +276,14 @@ export default function POS() {
     cash_tendered: cashTendered,
     card_brand: cardBrand,
     mpesa_reference: payment === "MPESA" ? paymentRef : "",
-  }), [payment, total, cashTendered, cardBrand, paymentRef]);
+    customer_id: customerId || null,
+    cash_amount: payment === "MIXED" ? mixedCashAmount : undefined,
+    credit_amount: payment === "MIXED"
+      ? Math.max(0, total - Number(mixedCashAmount || 0))
+      : payment === "CREDIT"
+        ? total
+        : 0,
+  }), [payment, total, cashTendered, cardBrand, paymentRef, customerId, mixedCashAmount]);
 
   const canCompleteSale = useMemo(() => {
     if (!cart.length) return false;
@@ -292,29 +303,47 @@ export default function POS() {
     return null;
   }, [cart, products, paymentPayload]);
 
-  /** Auto-print only when a real printer is available. Never blocks or shows printer errors. */
-  const tryAutoPrintReceipt = useCallback(async () => {
+  /**
+   * Auto receipt delivery after Complete Sale:
+   * - Desktop silent print when a printer is connected (no dialog / no confirmation)
+   * - Otherwise open PDF preview for manual printing
+   */
+  const tryAutoPrintReceipt = useCallback(async (receiptOverride = null) => {
+    const actions = normalizeAutoActions(settings || {});
+    if (!actions.auto_print_receipt) return;
+    const receipt = receiptOverride || lastSale;
     try {
-      if (typeof window !== "undefined" && typeof window.api?.printReceipt === "function") {
-        await window.api.printReceipt({ silent: true });
-        return;
-      }
-      const printers = await api.settings.getPrinters().catch(() => []);
+      const desktopApi = typeof window !== "undefined" ? window.nexoraDesktop : null;
       const configured = String(settings?.printer_name || "").trim();
-      const hasPrinter = (Array.isArray(printers) && printers.length > 0) || Boolean(configured);
-      if (!hasPrinter) return;
-      // Desktop/web with a detected printer — print without our own confirmation UI.
-      requestAnimationFrame(() => {
-        try {
-          window.print();
-        } catch {
-          /* never surface printer failures */
+
+      // Desktop silent print (no dialog, no confirmation) when a printer is available.
+      if (desktopApi?.isDesktop && typeof desktopApi.printReceipt === "function") {
+        let listed = [];
+        if (typeof desktopApi.getPrinters === "function") {
+          listed = await desktopApi.getPrinters().catch(() => []);
         }
-      });
+        const hasPrinter = (Array.isArray(listed) && listed.length > 0) || Boolean(configured);
+        if (hasPrinter) {
+          const printed = await desktopApi.printReceipt({
+            silent: true,
+            deviceName: configured || undefined,
+          });
+          if (printed?.success !== false) return;
+        }
+      }
+
+      // Web / no printer — open PDF preview for manual printing (never browser print dialog).
+      if (receipt) {
+        await openReceiptPdfPreview(receipt, settings, formatMoneyForCurrency);
+      }
     } catch {
-      /* printing must never fail the sale */
+      try {
+        if (receipt) await openReceiptPdfPreview(receipt, settings, formatMoneyForCurrency);
+      } catch {
+        /* printing must never fail the sale */
+      }
     }
-  }, [settings?.printer_name]);
+  }, [settings, lastSale, formatMoneyForCurrency]);
 
   const completeSale = useCallback(async () => {
     if (submittingRef.current) return;
@@ -327,6 +356,26 @@ export default function POS() {
     if (!paid.success) {
       showToast(paid.error || "Invalid payment");
       return;
+    }
+    if ((paid.payment_method === "CREDIT" || paid.payment_method === "MIXED") && paid.credit_amount > 0) {
+      try {
+        const limit = await api.receivables.checkCreditLimit({
+          customer_id: customerId,
+          credit_amount: paid.credit_amount,
+        });
+        if (limit?.block) {
+          showToast(limit.error || "Credit limit exceeded — sale blocked.");
+          return;
+        }
+        if (limit?.warn || limit?.exceeded) {
+          setCreditWarning(limit.error || "Customer is near or over credit limit.");
+          showToast(limit.error || "Warning: credit limit nearly reached.");
+        } else {
+          setCreditWarning("");
+        }
+      } catch {
+        /* server enforces again on create */
+      }
     }
     submittingRef.current = true;
     setSubmitting(true);
@@ -346,7 +395,11 @@ export default function POS() {
       change_due: paid.change_due,
       card_brand: paid.card_brand,
       payment_reference: paid.payment_reference,
-      split_payments: [],
+      split_payments: paid.split_payments || [],
+      cash_amount: paid.cash_amount,
+      credit_amount: paid.credit_amount,
+      paid_amount: paid.cash_amount ?? 0,
+      remaining_balance: paid.credit_amount ?? 0,
       customer: customer?.name || "Walk-in",
       currency_code: currency.code,
       currency_symbol: currency.symbol,
@@ -372,7 +425,9 @@ export default function POS() {
       change_due: paid.change_due,
       card_brand: paid.card_brand,
       payment_reference: paid.payment_reference,
-      split_payments: [],
+      cash_amount: paid.cash_amount,
+      credit_amount: paid.credit_amount,
+      split_payments: paid.split_payments || [],
       items: cart.map((line) => ({
         product_id: line.id, name: line.name, qty: line.qty, price: line.price, cost: line.cost,
       })),
@@ -394,21 +449,29 @@ export default function POS() {
       setDiscount(0);
       setCustomerId("");
       setCashTendered("");
+      setMixedCashAmount("");
+      setCreditWarning("");
       setPaymentRef("");
       setCardBrand("VISA");
       setApplyVat(false);
       setSearch("");
       setBarcode("");
       setPayment(DEFAULT_PAYMENT_METHOD);
+      const creditLabel = String(receipt.payment || "").toUpperCase() === "CREDIT"
+        ? " · Credit sale posted"
+        : "";
       showToast(
         offlineSaved
           ? `Sale saved offline · ${resolveReceiptNumber(receipt)} (will sync)`
-          : `Sale ${resolveReceiptNumber(receipt)} confirmed`
+          : `Sale ${resolveReceiptNumber(receipt)} confirmed${creditLabel}`
       );
       focusBarcode();
       if (!offlineSaved) await loadProducts();
       void offline.refreshStats?.();
-      void tryAutoPrintReceipt();
+      // Defer so #receipt-print paints with lastSale before silent print / PDF.
+      requestAnimationFrame(() => {
+        void tryAutoPrintReceipt(receipt);
+      });
     };
 
     try {
@@ -444,6 +507,11 @@ export default function POS() {
         id: result.id || result.sale?.id,
         invoice_no: result.invoice_no || result.receipt_no,
         receipt_no: result.receipt_no || result.invoice_no,
+        ar_invoice_no: result.ar_invoice_no || result.credit_automation?.ar_invoice_no || null,
+        paid_amount: result.paid_amount != null ? result.paid_amount : snapshot.paid_amount,
+        remaining_balance: result.remaining_balance != null ? result.remaining_balance : snapshot.remaining_balance,
+        payment_terms_days: result.payment_terms_days ?? result.credit_automation?.payment_terms_days ?? customer?.payment_terms_days ?? 30,
+        due_date: result.due_date || result.credit_automation?.due_date || null,
         created_at: result.sale?.created_at || snapshot.created_at,
         time: new Date(result.sale?.created_at || snapshot.created_at).toLocaleString(),
         cashier_name: result.sale?.cashier_name || user?.name || "Cashier",
@@ -454,6 +522,7 @@ export default function POS() {
         status: result.sale?.status || "Valid",
         client_reference: clientReference,
       };
+      if (result.warning) showToast(result.warning);
       await finishLocal(receipt);
     } catch (err) {
       // Unexpected throw (e.g. IndexedDB) — try to keep the sale if we already have a client ref.
@@ -484,6 +553,8 @@ export default function POS() {
     setDiscount(0);
     setCustomerId("");
     setCashTendered("");
+    setMixedCashAmount("");
+    setCreditWarning("");
     setPaymentRef("");
     setCardBrand("VISA");
     setApplyVat(false);
@@ -946,6 +1017,31 @@ export default function POS() {
                   className="nx-receipt-input"
                   aria-label="M-Pesa reference"
                 />
+              )}
+              {payment === "CREDIT" && (
+                <div className="nx-receipt-change is-ok">
+                  {customerId ? "Full amount on customer credit account" : "Select a customer for credit"}
+                </div>
+              )}
+              {payment === "MIXED" && (
+                <>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={mixedCashAmount}
+                    onChange={(event) => setMixedCashAmount(event.target.value)}
+                    placeholder="Cash portion"
+                    className="nx-receipt-input"
+                    aria-label="Cash portion for mixed payment"
+                  />
+                  <div className="nx-receipt-change is-ok">
+                    Credit portion {formatMoney(Math.max(0, total - Number(mixedCashAmount || 0)))}
+                  </div>
+                </>
+              )}
+              {creditWarning && (
+                <div className="nx-receipt-change is-short">{creditWarning}</div>
               )}
             </div>
 

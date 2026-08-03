@@ -1,5 +1,6 @@
 import {
   applySecurityHeaders,
+  applyCorsHeaders,
   consumeRateLimit,
   createAdminClient,
   getClientIp,
@@ -22,6 +23,8 @@ const AI_ACTIONS = new Set(["ai.meta", "ai.chat", "nexoraAi.meta", "nexoraAi.cha
 
 export default async function handler(req, res) {
   applySecurityHeaders(res);
+  applyCorsHeaders(req, res);
+  if (String(req.method || "").toUpperCase() === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return methodNotAllowed(res, "POST");
 
   const body = parseBody(req) || {};
@@ -29,7 +32,7 @@ export default async function handler(req, res) {
   if (!action) return jsonError(res, 400, "action is required.");
 
   // Public read-only probes may be called by monitors without browser Origin.
-  // Mutating authenticated actions still require Origin/Referer or Bearer (CSRF).
+  // Mutating authenticated actions still require Origin/Referer, Bearer, or desktop attestation.
   const publicAction = PUBLIC_ACTIONS.has(action);
   const origin = String(req.headers?.origin || "").trim();
   const referer = String(req.headers?.referer || "").trim();
@@ -92,6 +95,11 @@ export default async function handler(req, res) {
     const gate = assertPosActionAllowed(caller, action, params);
     if (!gate.ok) {
       return jsonError(res, 403, gate.error || "Permission denied.", gate.code || "FORBIDDEN");
+    }
+
+    // Public health probe must never depend on admin client init (desktop monitors / Electron).
+    if (action === "health.probe" && !caller?.id) {
+      return res.status(200).json({ success: true, ok: true });
     }
 
     const admin = createAdminClient();

@@ -1,4 +1,4 @@
-import { resolveApiUrl } from "./desktopRuntime";
+import { desktopApiHeaders, resolveApiUrl } from "./desktopRuntime";
 
 const ENDPOINT = "/api/send-email";
 
@@ -6,7 +6,7 @@ async function postOtp(payload) {
   try {
     const res = await fetch(resolveApiUrl(ENDPOINT), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: desktopApiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));

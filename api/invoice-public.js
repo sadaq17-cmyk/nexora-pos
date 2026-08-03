@@ -1,6 +1,7 @@
 import {
   applySecurityHeaders,
   createAdminClient,
+  beginApiRequest,
   isAllowedOrigin,
   methodNotAllowed,
   jsonError,
@@ -39,8 +40,7 @@ function publicInvoice(row) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["GET", "POST"] })) return;
 
   if (req.method === "GET") {
     const id = String(req.query?.id || req.query?.receipt_no || "").trim();

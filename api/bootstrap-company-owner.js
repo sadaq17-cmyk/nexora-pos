@@ -4,6 +4,7 @@ import {
   createAdminClient,
   ensureUserSynced,
   getClientIp,
+  beginApiRequest,
   isAllowedOrigin,
   parseBody,
   methodNotAllowed,
@@ -17,9 +18,7 @@ import { ensurePermanentOwnerHandler } from "./_ensurePermanentOwner.js";
 import { createCompanyWorkspace, completePublicSignup } from "./_signupCompany.js";
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST") return methodNotAllowed(res);
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST"] })) return;
 
   const body = parseBody(req) || {};
   const ip = getClientIp(req);

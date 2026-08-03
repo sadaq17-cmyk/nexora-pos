@@ -54,6 +54,8 @@ const EXECUTIVE_ONLY_TOOL_NAMES = Object.freeze([
   "purchases_summary",
   "reports_summary",
   "suppliers_lookup",
+  "supplier_insights",
+  "supplier_aging",
   "branches_list",
   "notifications_list",
   "employee_performance",
@@ -548,6 +550,23 @@ const EXECUTIVE_EXTRA_TOOLS = [
   {
     type: "function",
     function: {
+      name: "supplier_insights",
+      description:
+        "AI supplier insights: best by price, delivery time, reliability, price trends, suggested reorder qty and supplier.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "supplier_aging",
+      description: "Accounts payable aging buckets and overdue supplier invoices.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "customers_lookup",
       description: "Customer analytics lookup including balances where available.",
       parameters: {
@@ -867,6 +886,10 @@ async function executeTool(admin, caller, mode, name, rawArgs = {}) {
         })),
       };
     }
+    case "supplier_insights":
+      return handlePosAction(admin, caller, "suppliers.getInsights", {});
+    case "supplier_aging":
+      return handlePosAction(admin, caller, "suppliers.getAging", {});
     case "purchases_summary":
       return handlePosAction(admin, caller, "purchases.getDashboard", {});
     case "expenses_summary":

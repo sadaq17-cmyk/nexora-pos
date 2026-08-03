@@ -4,7 +4,7 @@ import {
   Plus, Building2, Phone, Users, X, Save, Trash2, FileText, CreditCard, Pencil,
   Search, Wallet, Mail, MapPin, LayoutGrid, List, Package, Download, Printer,
   Hash, Calendar, BookOpen, Archive, RotateCcw, ArrowUpDown, FileSpreadsheet,
-  ExternalLink, Activity, CheckCircle2,
+  ExternalLink, Activity, CheckCircle2, AlertTriangle, Sparkles, Clock,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -49,16 +49,27 @@ const STATUS_STYLES = {
 
 const MODULE_TABS = [
   { id: "directory", label: "Directory" },
+  { id: "payables", label: "Accounts Payable" },
+  { id: "aging", label: "Aging" },
+  { id: "insights", label: "AI Insights" },
   { id: "reports", label: "Reports" },
 ];
 
 const REPORT_TABS = [
-  { id: "outstanding", label: "Outstanding" },
-  { id: "purchases", label: "Purchase History" },
+  { id: "outstanding", label: "Outstanding Payables" },
+  { id: "purchases", label: "Purchase Summary" },
   { id: "payments", label: "Payment History" },
   { id: "top", label: "Top Suppliers" },
+  { id: "performance", label: "Performance" },
   { id: "statement", label: "Statement" },
 ];
+
+const PAYMENT_STATUS_LABEL = {
+  unpaid: "Unpaid",
+  partially_paid: "Partially Paid",
+  paid: "Paid",
+  overdue: "Overdue",
+};
 
 const STATEMENT_DATE_PRESETS = [
   { id: "today", label: "Today" },
@@ -692,6 +703,9 @@ export default function Suppliers() {
   const [suppliers, setSuppliers] = useState([]);
   const [dashboard, setDashboard] = useState(null);
   const [reports, setReports] = useState(null);
+  const [aging, setAging] = useState(null);
+  const [insights, setInsights] = useState(null);
+  const [payables, setPayables] = useState([]);
   const [loading, setLoading] = useState(true);
   const [moduleTab, setModuleTab] = useState("directory");
   const [reportTab, setReportTab] = useState("outstanding");
@@ -725,14 +739,20 @@ export default function Suppliers() {
   const load = async () => {
     setLoading(true);
     try {
-      const [list, dash, reps] = await Promise.all([
+      const [list, dash, reps, age, insight, pay] = await Promise.all([
         api.suppliers.getAll({ include_archived: true, include_deleted: showDeleted }).catch(() => []),
         api.suppliers.getDashboard?.().catch(() => null) || Promise.resolve(null),
         api.suppliers.getReports?.().catch(() => null) || Promise.resolve(null),
+        api.suppliers.getAging?.().catch(() => null) || Promise.resolve(null),
+        api.suppliers.getInsights?.().catch(() => null) || Promise.resolve(null),
+        api.suppliers.getPayables?.().catch(() => null) || Promise.resolve(null),
       ]);
       setSuppliers(Array.isArray(list) ? list : []);
       setDashboard(dash);
       setReports(reps);
+      setAging(age?.success ? age : reps?.aging || null);
+      setInsights(insight?.success ? insight : reps?.insights || null);
+      setPayables(Array.isArray(pay?.invoices) ? pay.invoices : []);
     } finally {
       setLoading(false);
     }
@@ -789,7 +809,11 @@ export default function Suppliers() {
     active:
       dashboard?.active_suppliers ??
       suppliers.filter((s) => supplierStatus(s) === "Active").length,
-    balances: dashboard?.outstanding_balance ?? suppliers.reduce((sum, s) => sum + Number(s.balance || 0), 0),
+    balances:
+      dashboard?.outstanding_payables
+      ?? dashboard?.outstanding_balance
+      ?? suppliers.reduce((sum, s) => sum + Number(s.balance || 0), 0),
+    overdue: dashboard?.overdue_payables ?? aging?.overdue_amount ?? 0,
     ordered: dashboard?.total_purchases ?? suppliers.reduce((sum, s) => sum + Number(s.total_ordered || 0), 0),
     paid: dashboard?.total_payments ?? suppliers.reduce((sum, s) => sum + Number(s.total_paid || 0), 0),
   };
@@ -1027,12 +1051,13 @@ export default function Suppliers() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4 mb-5">
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 sm:gap-4 mb-5">
         <StatCard icon={Building2} label="Total Suppliers" value={stats.total} color="#2563EB" />
-        <StatCard icon={CheckCircle2} label="Active" value={stats.active} color="#12A150" />
-        <StatCard icon={CreditCard} label="Outstanding Balance" value={money(stats.balances)} color="#DC2626" />
-        <StatCard icon={Package} label="Total Purchases" value={money(stats.ordered)} color="#0EA5E9" />
+        <StatCard icon={CreditCard} label="Outstanding Payables" value={money(stats.balances)} color="#DC2626" />
+        <StatCard icon={AlertTriangle} label="Overdue Payables" value={money(stats.overdue)} color="#B45309" />
+        <StatCard icon={Package} label="Monthly / Total Purchases" value={money(stats.ordered)} color="#0EA5E9" />
         <StatCard icon={Wallet} label="Total Payments" value={money(stats.paid)} color="#7C3AED" />
+        <StatCard icon={CheckCircle2} label="Active Suppliers" value={stats.active} color="#12A150" />
       </div>
 
       {recentTx.length > 0 && (
@@ -1068,7 +1093,146 @@ export default function Suppliers() {
         ))}
       </div>
 
-      {moduleTab === "reports" ? (
+      {moduleTab === "payables" && (
+        <div className="card mb-5 overflow-x-auto">
+          <h2 className="text-sm font-semibold mb-3">Accounts Payable — Open Invoices</h2>
+          <table className="w-full min-w-[900px]">
+            <thead>
+              <tr className="bg-app-panel-muted">
+                {["PO / Invoice", "Supplier", "Due Date", "Days Overdue", "Total", "Paid", "Balance", "Status"].map((h) => (
+                  <th key={h} className="px-3 py-2.5 text-xs uppercase tracking-wide text-app-muted text-left">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {payables.length === 0 ? (
+                <tr><td colSpan={8} className="text-center py-10 text-sm text-app-muted">No open payables.</td></tr>
+              ) : payables.map((inv) => (
+                <tr key={inv.id} className="border-t border-app">
+                  <td className="px-3 py-3 font-mono text-xs">{inv.po_number || inv.invoice_no || `#${inv.id}`}</td>
+                  <td className="px-3 py-3 text-sm">{suppliers.find((s) => Number(s.id) === Number(inv.supplier_id))?.name || `#${inv.supplier_id}`}</td>
+                  <td className="px-3 py-3 text-xs">{fmtDate(inv.due_date)}</td>
+                  <td className="px-3 py-3 text-xs">{inv.days_overdue || 0}</td>
+                  <td className="px-3 py-3 font-mono text-sm">{money(inv.total)}</td>
+                  <td className="px-3 py-3 font-mono text-sm">{money(inv.amount_paid)}</td>
+                  <td className="px-3 py-3 font-mono text-sm text-danger">{money(inv.remaining_balance ?? inv.balance)}</td>
+                  <td className="px-3 py-3 text-xs">{PAYMENT_STATUS_LABEL[inv.payment_status] || inv.payment_status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {moduleTab === "aging" && (
+        <div className="space-y-4 mb-5">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            {[
+              ["Current", aging?.buckets?.current],
+              ["1–30 Days", aging?.buckets?.days_1_30],
+              ["31–60 Days", aging?.buckets?.days_31_60],
+              ["61–90 Days", aging?.buckets?.days_61_90],
+              ["90+ Days", aging?.buckets?.days_90_plus],
+            ].map(([label, value]) => (
+              <StatCard key={label} icon={Clock} label={label} value={money(value || 0)} color="#2563EB" />
+            ))}
+          </div>
+          <div className="card overflow-x-auto">
+            <h2 className="text-sm font-semibold mb-3">Supplier Aging Detail</h2>
+            <table className="w-full min-w-[800px]">
+              <thead>
+                <tr className="bg-app-panel-muted">
+                  {["Invoice", "Supplier", "Due", "Days Overdue", "Bucket", "Balance", "Status"].map((h) => (
+                    <th key={h} className="px-3 py-2.5 text-xs uppercase tracking-wide text-app-muted text-left">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(aging?.invoices || []).length === 0 ? (
+                  <tr><td colSpan={7} className="text-center py-10 text-sm text-app-muted">No aged payables.</td></tr>
+                ) : (aging.invoices || []).map((inv) => (
+                  <tr key={inv.id} className="border-t border-app">
+                    <td className="px-3 py-3 font-mono text-xs">{inv.po_number || inv.invoice_no}</td>
+                    <td className="px-3 py-3 text-sm">{suppliers.find((s) => Number(s.id) === Number(inv.supplier_id))?.name || `#${inv.supplier_id}`}</td>
+                    <td className="px-3 py-3 text-xs">{fmtDate(inv.due_date || inv.payment_due_date)}</td>
+                    <td className="px-3 py-3 text-xs">{inv.days_overdue || 0}</td>
+                    <td className="px-3 py-3 text-xs">{String(inv.aging_bucket || "").replace(/_/g, " ")}</td>
+                    <td className="px-3 py-3 font-mono text-sm">{money(inv.balance)}</td>
+                    <td className="px-3 py-3 text-xs">{PAYMENT_STATUS_LABEL[inv.payment_status] || inv.payment_status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {moduleTab === "insights" && (
+        <div className="space-y-4 mb-5">
+          <div className="flex items-center gap-2 text-sm text-app-muted">
+            <Sparkles size={16} /> AI Supplier Insights (live from purchases, lead times, and stock)
+          </div>
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="card">
+              <h3 className="text-sm font-semibold mb-2">Best by Price</h3>
+              {(insights?.best_by_price || []).slice(0, 5).map((s) => (
+                <div key={s.id} className="flex justify-between text-sm py-1.5 border-b border-app last:border-0">
+                  <span>{s.name}</span>
+                  <span className="font-mono">{money(s.avg_po_value)}</span>
+                </div>
+              ))}
+              {!insights?.best_by_price?.length && <p className="text-xs text-app-muted">Not enough PO data yet.</p>}
+            </div>
+            <div className="card">
+              <h3 className="text-sm font-semibold mb-2">Best by Delivery</h3>
+              {(insights?.best_by_delivery || []).slice(0, 5).map((s) => (
+                <div key={s.id} className="flex justify-between text-sm py-1.5 border-b border-app last:border-0">
+                  <span>{s.name}</span>
+                  <span className="font-mono">{Number(s.avg_delivery_days || 0).toFixed(1)}d</span>
+                </div>
+              ))}
+              {!insights?.best_by_delivery?.length && <p className="text-xs text-app-muted">No delivery timing data yet.</p>}
+            </div>
+            <div className="card">
+              <h3 className="text-sm font-semibold mb-2">Most Reliable</h3>
+              {(insights?.most_reliable || []).slice(0, 5).map((s) => (
+                <div key={s.id} className="flex justify-between text-sm py-1.5 border-b border-app last:border-0">
+                  <span>{s.name}</span>
+                  <span className="font-mono">{s.reliability_score}%</span>
+                </div>
+              ))}
+              {!insights?.most_reliable?.length && <p className="text-xs text-app-muted">No reliability scores yet.</p>}
+            </div>
+          </div>
+          <div className="card overflow-x-auto">
+            <h3 className="text-sm font-semibold mb-2">Suggested Reorder</h3>
+            <table className="w-full min-w-[720px]">
+              <thead>
+                <tr className="bg-app-panel-muted">
+                  {["Product", "Stock", "Reorder", "Suggested Qty", "Suggested Supplier"].map((h) => (
+                    <th key={h} className="px-3 py-2.5 text-xs uppercase tracking-wide text-app-muted text-left">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(insights?.suggested_reorder || []).length === 0 ? (
+                  <tr><td colSpan={5} className="text-center py-8 text-sm text-app-muted">No low-stock reorder suggestions.</td></tr>
+                ) : (insights.suggested_reorder || []).map((row) => (
+                  <tr key={row.product_id} className="border-t border-app">
+                    <td className="px-3 py-3 text-sm">{row.product_name}</td>
+                    <td className="px-3 py-3 font-mono text-sm">{row.stock}</td>
+                    <td className="px-3 py-3 font-mono text-sm">{row.reorder_level}</td>
+                    <td className="px-3 py-3 font-mono text-sm">{row.suggested_qty}</td>
+                    <td className="px-3 py-3 text-sm">{row.suggested_supplier_name || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {moduleTab === "reports" && (
         <div>
           <div className="flex flex-wrap gap-2 mb-4">
             {REPORT_TABS.map((t) => (
@@ -1189,10 +1353,37 @@ export default function Suppliers() {
                   </tbody>
                 </table>
               )}
+              {reportTab === "performance" && (
+                <table className="w-full min-w-[800px]">
+                  <thead><tr className="bg-app-panel-muted">
+                    {["Supplier", "Orders", "Avg PO", "Delivery (d)", "Reliability", "Price Trend", "Balance"].map((h) => (
+                      <th key={h} className="px-3 py-2.5 text-xs uppercase tracking-wide text-app-muted text-left">{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {(insights?.most_reliable || reports?.insights?.most_reliable || []).map((r) => (
+                      <tr key={r.id} className="border-t border-app hover:bg-app-panel-muted cursor-pointer" onClick={() => openDetail(r)}>
+                        <td className="px-3 py-3 text-sm font-medium">{r.name}</td>
+                        <td className="px-3 py-3 text-sm">{r.order_count}</td>
+                        <td className="px-3 py-3 font-mono text-sm">{money(r.avg_po_value || 0)}</td>
+                        <td className="px-3 py-3 font-mono text-sm">{r.avg_delivery_days != null ? Number(r.avg_delivery_days).toFixed(1) : "—"}</td>
+                        <td className="px-3 py-3 font-mono text-sm">{r.reliability_score != null ? `${r.reliability_score}%` : "—"}</td>
+                        <td className="px-3 py-3 font-mono text-sm">{r.price_trend_pct != null ? `${r.price_trend_pct}%` : "—"}</td>
+                        <td className="px-3 py-3 font-mono text-sm">{money(r.balance || 0)}</td>
+                      </tr>
+                    ))}
+                    {(insights?.most_reliable || reports?.insights?.most_reliable || []).length === 0 && (
+                      <tr><td colSpan={7} className="text-center py-10 text-sm text-app-muted">No supplier performance data yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
         </div>
-      ) : (
+      )}
+
+      {moduleTab === "directory" && (
         <>
           <div className="flex flex-col lg:flex-row lg:items-center gap-3 mb-4">
             <div className="relative flex-1 max-w-md">

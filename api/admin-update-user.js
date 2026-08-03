@@ -1,6 +1,7 @@
 import {
   applySecurityHeaders,
   createAdminClient,
+  beginApiRequest,
   isAllowedOrigin,
   verifyCallerFromRequest,
   parseBody,
@@ -24,11 +25,7 @@ const validEmail = (value) => isValidEmailAddress(value);
 const validPhone = (value) => !value || /^\+?[\d\s().-]{7,20}$/.test(value);
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST" && req.method !== "PUT" && req.method !== "PATCH") {
-    return methodNotAllowed(res, "POST, PUT, PATCH");
-  }
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST", "PUT", "PATCH"] })) return;
 
   const verified = await verifyCallerFromRequest(req);
   if (verified.error) return jsonError(res, verified.status, verified.error);

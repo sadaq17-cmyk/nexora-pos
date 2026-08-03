@@ -171,9 +171,16 @@ export default function Dashboard() {
     totalSuppliers: 0,
     outstandingReceivables: 0,
     outstandingPayables: 0,
+    overduePayables: 0,
     topCustomers: [],
     topSuppliers: [],
     monthlyPurchases: [],
+  });
+  const [arDash, setArDash] = useState({
+    total_accounts_receivable: 0,
+    overdue_amount: 0,
+    customers_with_outstanding: 0,
+    top_debtors: [],
   });
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -226,6 +233,7 @@ export default function Dashboard() {
         totalSuppliers: Number(s?.total_suppliers) || 0,
         outstandingReceivables: Number(s?.outstanding_receivables) || 0,
         outstandingPayables: Number(s?.outstanding_payables) || 0,
+        overduePayables: Number(s?.overdue_payables) || 0,
         topCustomers: Array.isArray(s?.top_customers) ? s.top_customers : [],
         topSuppliers: Array.isArray(s?.top_suppliers) ? s.top_suppliers : [],
         monthlyPurchases: Array.isArray(s?.monthly_purchases) ? s.monthly_purchases : [],
@@ -256,12 +264,21 @@ export default function Dashboard() {
       // Phase 2 — extended stats after first paint (skip on realtime ticks to cut noise).
       if (refreshTick === 0) {
         try {
-          const extendedStats = await settle(
-            api.dashboard?.getExtendedStats?.() ?? Promise.resolve(null),
-            null,
-            12_000
-          );
-          if (!cancelled) applyExtended(extendedStats);
+          const [extendedStats, receivablesDash] = await Promise.all([
+            settle(api.dashboard?.getExtendedStats?.() ?? Promise.resolve(null), null, 12_000),
+            settle(api.receivables?.getDashboard?.() ?? Promise.resolve(null), null, 12_000),
+          ]);
+          if (!cancelled) {
+            applyExtended(extendedStats);
+            if (receivablesDash?.success) {
+              setArDash({
+                total_accounts_receivable: Number(receivablesDash.total_accounts_receivable) || 0,
+                overdue_amount: Number(receivablesDash.overdue_amount) || 0,
+                customers_with_outstanding: Number(receivablesDash.customers_with_outstanding) || 0,
+                top_debtors: Array.isArray(receivablesDash.top_debtors) ? receivablesDash.top_debtors.slice(0, 5) : [],
+              });
+            }
+          }
         } catch {
           /* non-blocking */
         }
@@ -475,8 +492,14 @@ export default function Dashboard() {
         <MetricCard label="Total Products" value={extended.totalProducts} />
         <MetricCard label="Out of Stock" value={extended.outOfStock} />
         <MetricCard label="Suppliers" value={extended.totalSuppliers} />
-        <MetricCard label="Receivables" value={money(extended.outstandingReceivables)} />
+        <MetricCard
+          label="Accounts Receivable"
+          value={money(arDash.total_accounts_receivable || extended.outstandingReceivables)}
+        />
+        <MetricCard label="AR Overdue" value={money(arDash.overdue_amount)} />
+        <MetricCard label="Customers Owed" value={arDash.customers_with_outstanding} />
         <MetricCard label="Payables" value={money(extended.outstandingPayables)} />
+        <MetricCard label="AP Overdue" value={money(extended.overduePayables || 0)} />
       </div>
 
       {/* Quick actions */}
@@ -533,11 +556,31 @@ export default function Dashboard() {
 
         <Panel title="Outstanding Balances" meta="Receivables vs Payables" empty={false}>
           <div className="nx-owner-grid">
-            <OwnerStat icon={Wallet} label="Receivables" value={money(extended.outstandingReceivables)} tone="success" />
+            <OwnerStat
+              icon={Wallet}
+              label="Receivables"
+              value={money(arDash.total_accounts_receivable || extended.outstandingReceivables)}
+              tone="success"
+            />
+            <OwnerStat icon={AlertTriangle} label="AR Overdue" value={money(arDash.overdue_amount)} tone="danger" />
             <OwnerStat icon={Truck} label="Payables" value={money(extended.outstandingPayables)} tone="warning" />
-            <OwnerStat icon={PackageX} label="Out of Stock" value={extended.outOfStock} tone="danger" />
-            <OwnerStat icon={Package} label="Total Products" value={extended.totalProducts} tone="accent" />
+            <OwnerStat icon={Users} label="Debtors" value={arDash.customers_with_outstanding} tone="accent" />
           </div>
+          {arDash.top_debtors.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-app-muted">Top Debtors</div>
+              <div className="nx-top-products">
+                {arDash.top_debtors.map((d, index) => (
+                  <div key={d.id || index} className="nx-top-sell-row">
+                    <div className="nx-top-sell-meta">
+                      <span className="nx-top-sell-name truncate">{d.name}</span>
+                      <span className="nx-top-sell-rev font-mono">{money(d.outstanding)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Panel>
       </div>
 

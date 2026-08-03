@@ -313,6 +313,9 @@ const ALLOWED_ORIGINS = new Set([
   "https://nexora-pos-nexoraposapp.vercel.app",
 ]);
 
+/** Must match src/lib/desktopRuntime.js + electron/preload.cjs */
+export const NEXORA_DESKTOP_ATTESTATION = "nexora-desktop-v1";
+
 function isLocalDevOrigin(origin) {
   try {
     const url = new URL(origin);
@@ -325,7 +328,74 @@ function isLocalDevOrigin(origin) {
   }
 }
 
+/**
+ * Electron file:// shell sends Origin: "null". Allow only when our desktop
+ * attestation header is present (or requested on CORS preflight).
+ */
+export function isDesktopAttested(req) {
+  const origin = String(req.headers?.origin || "").trim();
+  const method = String(req.method || "GET").toUpperCase();
+  const attestation = String(req.headers?.["x-nexora-desktop"] || "").trim();
+  const nullishOrigin = !origin || origin === "null";
+
+  if (attestation === NEXORA_DESKTOP_ATTESTATION && nullishOrigin) return true;
+
+  // Preflight does not include custom headers — only Access-Control-Request-Headers.
+  if (method === "OPTIONS" && nullishOrigin) {
+    const requested = String(req.headers?.["access-control-request-headers"] || "").toLowerCase();
+    if (requested.split(",").some((h) => h.trim() === "x-nexora-desktop")) return true;
+  }
+  return false;
+}
+
+export function applyCorsHeaders(req, res) {
+  const origin = String(req.headers?.origin || "").trim();
+  if (origin && (ALLOWED_ORIGINS.has(origin) || isLocalDevOrigin(origin))) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else if (isDesktopAttested(req)) {
+    // Chromium file:// → Origin: null
+    res.setHeader("Access-Control-Allow-Origin", "null");
+    res.setHeader("Vary", "Origin");
+  } else if (origin && origin.endsWith(".vercel.app") && origin.includes("nexora")) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Nexora-Desktop"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+/**
+ * Security headers + CORS + OPTIONS + method/origin gate.
+ * Returns true when the response was already ended (caller must return).
+ */
+export function beginApiRequest(req, res, { methods = ["POST"] } = {}) {
+  applySecurityHeaders(res);
+  applyCorsHeaders(req, res);
+  const method = String(req.method || "GET").toUpperCase();
+  if (method === "OPTIONS") {
+    res.status(204).end();
+    return true;
+  }
+  const allowed = methods.map((m) => String(m).toUpperCase());
+  if (!allowed.includes(method)) {
+    methodNotAllowed(res, allowed.join(", "));
+    return true;
+  }
+  if (!isAllowedOrigin(req)) {
+    jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+    return true;
+  }
+  return false;
+}
+
 export function isAllowedOrigin(req) {
+  if (isDesktopAttested(req)) return true;
+
   const origin = String(req.headers?.origin || "").trim();
   const referer = String(req.headers?.referer || "").trim();
   if (origin && (ALLOWED_ORIGINS.has(origin) || isLocalDevOrigin(origin))) return true;

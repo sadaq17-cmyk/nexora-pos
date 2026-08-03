@@ -342,6 +342,8 @@ function seedDatabase() {
     purchases,
     purchaseReturns: [],
     purchasePayments: [],
+    purchaseRequests: [],
+    purchaseRequestItems: [],
     supplierLedgerAdjustments: [],
     sales,
     heldSales: [],
@@ -572,6 +574,10 @@ function hydrateDb(data) {
     ...supplier,
   }));
   dbData.customerPayments = dbData.customerPayments || [];
+  dbData.customerInvoices = dbData.customerInvoices || [];
+  dbData.customerInvoiceItems = dbData.customerInvoiceItems || [];
+  dbData.customerPaymentAllocations = dbData.customerPaymentAllocations || [];
+  dbData.customerCreditNotes = dbData.customerCreditNotes || [];
   dbData.supplierPayments = dbData.supplierPayments || [];
   dbData.invoiceVerifications = Array.isArray(data?.invoiceVerifications) ? data.invoiceVerifications : [];
   dbData.approvalRequests = Array.isArray(data?.approvalRequests) ? data.approvalRequests : (dbData.approvalRequests || []);
@@ -687,8 +693,9 @@ function hydrateDb(data) {
     owner_user_id: Number(dbData.users.find((user) => Number(user.company_id) === Number(company.id) && normalizeRole(user.role) === "owner")?.id || company.owner_user_id || 9),
   }));
   const tenantCollections = [
-    "categories", "products", "customers", "customerPayments", "suppliers", "supplierPayments",
-    "purchases", "purchaseReturns", "purchasePayments", "supplierLedgerAdjustments", "sales", "heldSales", "stockTransfers", "expenseCategories",
+    "categories", "products", "customers", "customerPayments", "customerInvoices", "customerInvoiceItems",
+    "customerPaymentAllocations", "customerCreditNotes", "suppliers", "supplierPayments",
+    "purchases", "purchaseReturns", "purchasePayments", "purchaseRequests", "purchaseRequestItems", "supplierLedgerAdjustments", "sales", "heldSales", "stockTransfers", "expenseCategories",
     "expenses", "brands", "units", "warehouses", "warehouseStock", "stockMovements",
     "productVariantSkus", "productSerials", "stockLots", "stockLotAllocations",
   ];
@@ -1059,6 +1066,121 @@ function logAudit(action, module, details) {
 // purchase invoice (Draft/Cancelled/Rejected excluded), payment, return, and
 // ledger adjustment on file — so the demo/offline data never drifts from the
 // same enterprise AP rules used against the real backend.
+function daysBetweenMock(fromDate, toDate = new Date()) {
+  if (!fromDate) return 0;
+  const a = new Date(String(fromDate).slice(0, 10) + "T00:00:00");
+  const b = new Date(toDate);
+  return Math.floor((b.getTime() - a.getTime()) / 86400000);
+}
+
+function derivePaymentStatusMock(purchase, today = new Date()) {
+  const balance = Number(purchase.balance ?? purchase.amount_due) || 0;
+  const total = Number(purchase.total) || 0;
+  const paid = Number(purchase.amount_paid) || 0;
+  if (balance <= 0.0001 || (total > 0 && paid >= total - 0.0001)) return "paid";
+  const due = purchase.due_date || purchase.payment_due_date;
+  if (due) {
+    const dueDt = new Date(String(due).slice(0, 10) + "T23:59:59");
+    if (dueDt.getTime() < today.getTime() && balance > 0) return "overdue";
+  }
+  if (paid > 0 && balance > 0) return "partially_paid";
+  return "unpaid";
+}
+
+function buildSupplierAgingMock() {
+  const today = new Date();
+  const buckets = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };
+  const invoices = [];
+  for (const p of db.purchases || []) {
+    if (["Cancelled", "Rejected", "Draft"].includes(p.status)) continue;
+    const bal = Number(p.balance) || 0;
+    if (bal <= 0) continue;
+    const due = p.due_date || p.payment_due_date || p.created_at;
+    const overdue = Math.max(0, daysBetweenMock(due, today));
+    let bucket = "current";
+    if (overdue > 0 && overdue <= 30) bucket = "days_1_30";
+    else if (overdue <= 60 && overdue > 30) bucket = "days_31_60";
+    else if (overdue <= 90 && overdue > 60) bucket = "days_61_90";
+    else if (overdue > 90) bucket = "days_90_plus";
+    buckets[bucket] += bal;
+    invoices.push({
+      ...p,
+      payment_status: derivePaymentStatusMock(p, today),
+      days_overdue: overdue,
+      aging_bucket: bucket,
+      remaining_balance: bal,
+    });
+  }
+  return {
+    success: true,
+    as_of: today.toISOString().slice(0, 10),
+    buckets,
+    total_payables: Object.values(buckets).reduce((s, v) => s + v, 0),
+    overdue_amount: buckets.days_1_30 + buckets.days_31_60 + buckets.days_61_90 + buckets.days_90_plus,
+    invoices,
+  };
+}
+
+function buildSupplierInsightsMock() {
+  const scored = (db.suppliers || [])
+    .filter((s) => !s.deleted_at && (s.status || "Active") === "Active")
+    .map((s) => {
+      const pos = (db.purchases || []).filter(
+        (p) => Number(p.supplier_id) === Number(s.id) && !["Cancelled", "Rejected"].includes(p.status)
+      );
+      const costs = pos.map((p) => Number(p.total) || 0);
+      const avgCost = costs.length ? costs.reduce((a, b) => a + b, 0) / costs.length : null;
+      const leadDays = pos
+        .filter((p) => p.received_at && (p.ordered_at || p.approved_at || p.created_at))
+        .map((p) => Math.max(0, daysBetweenMock(p.ordered_at || p.approved_at || p.created_at, new Date(p.received_at))));
+      const avgLead = leadDays.length
+        ? leadDays.reduce((a, b) => a + b, 0) / leadDays.length
+        : Number(s.delivery_lead_days) || 7;
+      const completed = pos.filter((p) => ["Received", "PartiallyReceived", "Approved"].includes(p.status)).length;
+      const reliability = pos.length ? completed / pos.length : 0;
+      const priceTrend = costs.length >= 2 ? (costs[0] - costs[costs.length - 1]) / Math.max(1, costs[costs.length - 1]) : 0;
+      return {
+        id: s.id,
+        name: s.name,
+        code: s.code,
+        balance: Number(s.balance) || 0,
+        order_count: pos.length,
+        avg_po_value: avgCost,
+        avg_delivery_days: avgLead,
+        reliability_score: Math.round(reliability * 100),
+        price_trend_pct: Math.round(priceTrend * 1000) / 10,
+      };
+    });
+  const byPrice = [...scored].filter((s) => s.avg_po_value != null).sort((a, b) => a.avg_po_value - b.avg_po_value);
+  const byDelivery = [...scored].sort((a, b) => a.avg_delivery_days - b.avg_delivery_days);
+  const byReliability = [...scored].sort((a, b) => b.reliability_score - a.reliability_score || b.order_count - a.order_count);
+  const lowStock = (db.products || []).filter((p) => Number(p.stock) <= Number(p.reorder_level || 0));
+  const suggestedReorder = lowStock.slice(0, 12).map((p) => {
+    const reorder = Number(p.reorder_level || 0);
+    const stock = Number(p.stock || 0);
+    const suggestedQty = Math.max(reorder * 2 - stock, reorder || 1, 1);
+    const suggestedSupplier = byReliability[0] || byPrice[0] || null;
+    return {
+      product_id: p.id,
+      product_name: p.name,
+      stock,
+      reorder_level: reorder,
+      suggested_qty: Math.ceil(suggestedQty),
+      suggested_supplier_id: suggestedSupplier?.id || null,
+      suggested_supplier_name: suggestedSupplier?.name || null,
+    };
+  });
+  return {
+    success: true,
+    best_by_price: byPrice.slice(0, 5),
+    best_by_delivery: byDelivery.slice(0, 5),
+    most_reliable: byReliability.slice(0, 5),
+    price_trends: scored.filter((s) => s.order_count >= 2).slice(0, 8),
+    suggested_reorder: suggestedReorder,
+    suggested_supplier: byReliability[0] || byPrice[0] || null,
+  };
+}
+
 function recomputeSupplierBalanceMock(supplierId) {
   const id = Number(supplierId);
   if (!id) return null;
@@ -1364,7 +1486,9 @@ function buildUserSales(filters = {}) {
 
 const TENANT_COLLECTIONS = [
   "users", "branches", "categories", "products", "customers", "customerPayments",
-  "suppliers", "supplierPayments", "purchases", "purchaseReturns", "purchasePayments", "supplierLedgerAdjustments", "sales", "heldSales",
+  "customerInvoices", "customerInvoiceItems", "customerPaymentAllocations", "customerCreditNotes",
+  "suppliers", "supplierPayments", "purchases", "purchaseReturns", "purchasePayments", "purchaseRequests", "purchaseRequestItems",
+  "supplierLedgerAdjustments", "sales", "heldSales",
   "stockTransfers", "expenseCategories", "expenses", "brands", "units", "warehouses",
   "warehouseStock", "stockMovements", "productVariantSkus", "productSerials", "stockLots",
   "stockLotAllocations", "auditLog", "roles", "subscriptions",
@@ -2640,7 +2764,9 @@ const rawApi = {
         points: Number(customer.points || 0),
         visits: 0,
         spent: 0,
-        balance: 0,
+        balance: Number(customer.opening_balance || customer.balance || 0),
+        opening_balance: Number(customer.opening_balance || 0),
+        payment_terms_days: Number(customer.payment_terms_days || 30),
         credit_limit: Number(customer.credit_limit || 0),
         address: customer.address || "",
         email: customer.email || "",
@@ -2720,6 +2846,414 @@ const rawApi = {
           }))
       ),
   },
+  receivables: {
+    getPolicy: () => {
+      const settings = db.settings || {};
+      return wait({
+        success: true,
+        policy: {
+          block_sales_over_credit_limit: settings.block_sales_over_credit_limit !== false,
+          warn_credit_limit: settings.warn_credit_limit !== false,
+          default_payment_terms_days: Number(settings.default_payment_terms_days) || 30,
+        },
+      });
+    },
+    updatePolicy: (payload = {}) => {
+      db.settings = {
+        ...(db.settings || {}),
+        block_sales_over_credit_limit: payload.block_sales_over_credit_limit !== false,
+        warn_credit_limit: payload.warn_credit_limit !== false,
+        default_payment_terms_days: Number(payload.default_payment_terms_days) || 30,
+      };
+      persist();
+      return rawApi.receivables.getPolicy();
+    },
+    checkCreditLimit: ({ customer_id, credit_amount = 0 } = {}) => {
+      const customer = db.customers.find((c) => Number(c.id) === Number(customer_id));
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const open = (db.customerInvoices || []).filter(
+        (i) => Number(i.customer_id) === Number(customer_id) && i.status !== "void" && Number(i.balance) > 0
+      );
+      const current = open.reduce((s, i) => s + Number(i.balance || 0), 0) + Number(customer.opening_balance || 0);
+      const limit = Number(customer.credit_limit || 0);
+      const projected = current + Number(credit_amount || 0);
+      const available = limit > 0 ? Math.max(0, limit - current) : null;
+      const exceeded = limit > 0 && projected > limit;
+      const policy = {
+        block_sales_over_credit_limit: db.settings?.block_sales_over_credit_limit !== false,
+        warn_credit_limit: db.settings?.warn_credit_limit !== false,
+      };
+      return wait({
+        success: true,
+        current_balance: current,
+        credit_limit: limit,
+        available_credit: available,
+        projected_balance: projected,
+        exceeded,
+        block: exceeded && policy.block_sales_over_credit_limit,
+        warn: policy.warn_credit_limit && (exceeded || (limit > 0 && projected >= limit * 0.9)),
+        error: exceeded
+          ? `Credit limit exceeded. Limit ${limit.toFixed(2)}, available ${Number(available || 0).toFixed(2)}.`
+          : null,
+        policy,
+      });
+    },
+    getAccount: ({ customer_id, id } = {}) => {
+      const cid = Number(customer_id || id);
+      const customer = db.customers.find((c) => Number(c.id) === cid);
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const invoices = (db.customerInvoices || []).filter((i) => Number(i.customer_id) === cid && i.status !== "void");
+      const current = invoices.filter((i) => Number(i.balance) > 0).reduce((s, i) => s + Number(i.balance), 0)
+        + Number(customer.opening_balance || 0);
+      const overdue = invoices
+        .filter((i) => Number(i.balance) > 0 && i.due_date && new Date(i.due_date) < new Date())
+        .reduce((s, i) => s + Number(i.balance), 0);
+      const limit = Number(customer.credit_limit || 0);
+      return wait({
+        success: true,
+        customer,
+        account: {
+          customer_id: cid,
+          name: customer.name,
+          credit_limit: limit,
+          current_balance: current,
+          available_credit: limit > 0 ? Math.max(0, limit - current) : null,
+          overdue_balance: overdue,
+          over_limit: limit > 0 && current > limit,
+        },
+      });
+    },
+    createInvoice: (params = {}) => {
+      const customer = db.customers.find((c) => Number(c.id) === Number(params.customer_id));
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const total = Number(params.total || 0);
+      if (!(total > 0)) return wait({ success: false, error: "Total required." });
+      const paymentType = String(params.payment_type || "credit").toLowerCase();
+      let cashAmount = Number(params.cash_amount || 0);
+      let creditAmount = Number(params.credit_amount || 0);
+      if (paymentType === "cash") { cashAmount = total; creditAmount = 0; }
+      else if (paymentType === "credit") { cashAmount = 0; creditAmount = total; }
+      else { creditAmount = Math.max(0, total - cashAmount); }
+      if (creditAmount > 0 && db.settings?.block_sales_over_credit_limit !== false) {
+        const open = (db.customerInvoices || []).filter(
+          (i) => Number(i.customer_id) === Number(customer.id) && i.status !== "void" && Number(i.balance) > 0
+        );
+        const current = open.reduce((s, i) => s + Number(i.balance || 0), 0) + Number(customer.opening_balance || 0);
+        const limit = Number(customer.credit_limit || 0);
+        if (limit > 0 && current + creditAmount > limit) {
+          return wait({
+            success: false,
+            error: `Credit limit exceeded. Limit ${limit.toFixed(2)}, available ${Math.max(0, limit - current).toFixed(2)}.`,
+            code: "CREDIT_LIMIT",
+          });
+        }
+      }
+      const invoiceDate = String(params.invoice_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      const terms = Number(params.payment_terms_days || customer.payment_terms_days || db.settings?.default_payment_terms_days || 30);
+      const dueDate = String(params.due_date || new Date(Date.parse(invoiceDate) + terms * 86400000).toISOString().slice(0, 10)).slice(0, 10);
+      const amountPaid = cashAmount;
+      const balance = Math.max(0, total - amountPaid);
+      let status = balance <= 0 ? "paid" : "unpaid";
+      if (balance > 0 && amountPaid > 0) status = "partially_paid";
+      if (balance > 0 && new Date(dueDate) < new Date()) status = "overdue";
+      const invoiceNo = params.invoice_no || `CI-${new Date().getFullYear()}-${String(nextId("customerInvoice")).padStart(5, "0")}`;
+      const invoice = {
+        id: nextId("customerInvoice"),
+        company_id: customer.company_id || currentMockUser?.company_id || 1,
+        customer_id: customer.id,
+        invoice_no: invoiceNo,
+        invoice_date: invoiceDate,
+        due_date: dueDate,
+        subtotal: total,
+        tax: Number(params.tax || 0),
+        total,
+        amount_paid: amountPaid,
+        balance,
+        payment_type: paymentType,
+        cash_amount: cashAmount,
+        credit_amount: creditAmount,
+        status,
+        notes: params.notes || "",
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      db.customerInvoices = db.customerInvoices || [];
+      db.customerInvoices.push(invoice);
+      db.customerInvoiceItems = db.customerInvoiceItems || [];
+      db.customerInvoiceItems.push({
+        id: nextId("customerInvoiceItem"),
+        company_id: invoice.company_id,
+        invoice_id: invoice.id,
+        description: params.notes || "Credit invoice",
+        qty: 1,
+        unit_price: total,
+        line_total: total,
+      });
+      if (cashAmount > 0) {
+        const payment = {
+          id: nextId("customerPayment"),
+          company_id: invoice.company_id,
+          customer_id: customer.id,
+          amount: cashAmount,
+          method: params.cash_method || "Cash",
+          invoice_id: invoice.id,
+          receipt_no: `RCP-${new Date().getFullYear()}-${String(nextId("customerReceipt")).padStart(5, "0")}`,
+          created_at: nowIso(),
+          notes: "Invoice cash portion",
+        };
+        db.customerPayments.unshift(payment);
+        db.customerPaymentAllocations = db.customerPaymentAllocations || [];
+        db.customerPaymentAllocations.push({
+          id: nextId("customerAlloc"),
+          company_id: invoice.company_id,
+          payment_id: payment.id,
+          invoice_id: invoice.id,
+          amount: cashAmount,
+        });
+      }
+      const openBal = (db.customerInvoices || [])
+        .filter((i) => Number(i.customer_id) === Number(customer.id) && i.status !== "void")
+        .reduce((s, i) => s + Math.max(0, Number(i.balance)), 0) + Number(customer.opening_balance || 0);
+      db.customers = db.customers.map((c) => (Number(c.id) === Number(customer.id) ? { ...c, balance: openBal } : c));
+      logAudit("credit_invoice_create", "receivables", { invoice_id: invoice.id, invoice_no: invoiceNo, total });
+      persist();
+      return wait({ success: true, invoice, customer_balance: openBal });
+    },
+    receivePayment: (params = {}) => {
+      const customer = db.customers.find((c) => Number(c.id) === Number(params.customer_id));
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const amount = Number(params.amount || 0);
+      if (!(amount > 0)) return wait({ success: false, error: "Positive amount required." });
+      let targets = [];
+      if (Array.isArray(params.allocations) && params.allocations.length) {
+        targets = params.allocations.map((a) => ({ invoice_id: Number(a.invoice_id), amount: Number(a.amount) }));
+      } else if (params.invoice_id) {
+        targets = [{ invoice_id: Number(params.invoice_id), amount }];
+      } else {
+        let remaining = amount;
+        const open = (db.customerInvoices || [])
+          .filter((i) => Number(i.customer_id) === Number(customer.id) && Number(i.balance) > 0 && i.status !== "void")
+          .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+        for (const inv of open) {
+          if (remaining <= 0) break;
+          const apply = Math.min(remaining, Number(inv.balance));
+          targets.push({ invoice_id: inv.id, amount: apply });
+          remaining -= apply;
+        }
+      }
+      const receiptNo = `RCP-${new Date().getFullYear()}-${String(nextId("customerReceipt")).padStart(5, "0")}`;
+      const payment = {
+        id: nextId("customerPayment"),
+        company_id: customer.company_id || 1,
+        customer_id: customer.id,
+        amount,
+        method: params.method || "Cash",
+        invoice_id: targets[0]?.invoice_id || null,
+        receipt_no: receiptNo,
+        notes: params.notes || "",
+        created_at: nowIso(),
+      };
+      db.customerPayments.unshift(payment);
+      db.customerPaymentAllocations = db.customerPaymentAllocations || [];
+      for (const t of targets) {
+        const inv = (db.customerInvoices || []).find((i) => Number(i.id) === Number(t.invoice_id));
+        if (!inv) continue;
+        const apply = Math.min(Number(t.amount), Number(inv.balance));
+        const amountPaid = Number(inv.amount_paid) + apply;
+        const balance = Math.max(0, Number(inv.total) - amountPaid);
+        let status = balance <= 0 ? "paid" : amountPaid > 0 ? "partially_paid" : "unpaid";
+        if (balance > 0 && inv.due_date && new Date(inv.due_date) < new Date()) status = "overdue";
+        Object.assign(inv, { amount_paid: amountPaid, balance, status, updated_at: nowIso() });
+        db.customerPaymentAllocations.push({
+          id: nextId("customerAlloc"),
+          company_id: payment.company_id,
+          payment_id: payment.id,
+          invoice_id: inv.id,
+          amount: apply,
+        });
+      }
+      const openBal = (db.customerInvoices || [])
+        .filter((i) => Number(i.customer_id) === Number(customer.id) && i.status !== "void")
+        .reduce((s, i) => s + Math.max(0, Number(i.balance)), 0) + Number(customer.opening_balance || 0);
+      db.customers = db.customers.map((c) => (Number(c.id) === Number(customer.id) ? { ...c, balance: openBal } : c));
+      logAudit("customer_payment_receive", "receivables", { payment_id: payment.id, receipt_no: receiptNo, amount });
+      persist();
+      return wait({ success: true, payment, receipt_no: receiptNo, customer_balance: openBal, allocations: targets });
+    },
+    getOutstanding: (params = {}) => {
+      const today = new Date();
+      let rows = (db.customerInvoices || []).filter((i) => i.status !== "void");
+      if (params.customer_id) rows = rows.filter((i) => Number(i.customer_id) === Number(params.customer_id));
+      if (params.open_only !== false) rows = rows.filter((i) => Number(i.balance) > 0);
+      const invoices = rows.map((inv) => {
+        const days = inv.due_date ? Math.max(0, Math.floor((today - new Date(inv.due_date)) / 86400000)) : 0;
+        let status = inv.status;
+        if (Number(inv.balance) <= 0) status = "paid";
+        else if (days > 0) status = "overdue";
+        else if (Number(inv.amount_paid) > 0) status = "partially_paid";
+        else status = "unpaid";
+        return { ...inv, status, days_overdue: days, remaining_balance: Number(inv.balance) };
+      });
+      return wait({ success: true, invoices });
+    },
+    listInvoices: (params = {}) => rawApi.receivables.getOutstanding(params),
+    getAging: (params = {}) => {
+      const open = (db.customerInvoices || []).filter((i) => Number(i.balance) > 0 && i.status !== "void");
+      const today = new Date();
+      const buckets = { current: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_90_plus: 0 };
+      const byCustomer = new Map();
+      const invoices = open.map((inv) => {
+        const overdue = inv.due_date ? Math.floor((today - new Date(inv.due_date)) / 86400000) : 0;
+        let bucket = "current";
+        if (overdue > 90) bucket = "days_90_plus";
+        else if (overdue > 60) bucket = "days_61_90";
+        else if (overdue > 30) bucket = "days_31_60";
+        else if (overdue > 0) bucket = "days_1_30";
+        buckets[bucket] += Number(inv.balance);
+        byCustomer.set(Number(inv.customer_id), (byCustomer.get(Number(inv.customer_id)) || 0) + Number(inv.balance));
+        return { ...inv, days_overdue: Math.max(0, overdue), aging_bucket: bucket, status: overdue > 0 ? "overdue" : inv.status };
+      });
+      const top_debtors = [...byCustomer.entries()]
+        .map(([id, outstanding]) => {
+          const c = db.customers.find((x) => Number(x.id) === Number(id));
+          return { id, name: c?.name || `#${id}`, credit_limit: c?.credit_limit || 0, outstanding };
+        })
+        .sort((a, b) => b.outstanding - a.outstanding)
+        .slice(0, Number(params.top) || 10);
+      return wait({
+        success: true,
+        buckets,
+        total_receivable: Object.values(buckets).reduce((s, v) => s + v, 0),
+        overdue_amount: buckets.days_1_30 + buckets.days_31_60 + buckets.days_61_90 + buckets.days_90_plus,
+        customers_with_balance: byCustomer.size,
+        top_debtors,
+        invoices,
+      });
+    },
+    getDashboard: async () => {
+      const aging = await rawApi.receivables.getAging({});
+      return {
+        success: true,
+        total_accounts_receivable: aging.total_receivable,
+        overdue_amount: aging.overdue_amount,
+        customers_with_outstanding: aging.customers_with_balance,
+        top_debtors: aging.top_debtors,
+        buckets: aging.buckets,
+      };
+    },
+    getStatement: ({ id, customer_id, start_date, end_date } = {}) => {
+      const cid = Number(id || customer_id);
+      const customer = db.customers.find((c) => Number(c.id) === cid);
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const invoices = (db.customerInvoices || []).filter((i) => Number(i.customer_id) === cid && i.status !== "void");
+      const payments = (db.customerPayments || []).filter((p) => Number(p.customer_id) === cid);
+      const creditNotes = (db.customerCreditNotes || []).filter((n) => Number(n.customer_id) === cid);
+      const entries = [];
+      for (const inv of invoices) {
+        entries.push({
+          entry_date: inv.invoice_date || inv.created_at,
+          entry_type: "invoice",
+          reference: inv.invoice_no,
+          description: `Invoice ${inv.invoice_no}`,
+          debit: Number(inv.total),
+          credit: 0,
+        });
+      }
+      for (const p of payments) {
+        entries.push({
+          entry_date: p.created_at,
+          entry_type: "payment",
+          reference: p.receipt_no || p.method,
+          description: `Payment via ${p.method || "Cash"}`,
+          debit: 0,
+          credit: Number(p.amount),
+        });
+      }
+      for (const cn of creditNotes) {
+        entries.push({
+          entry_date: cn.created_at,
+          entry_type: "credit_note",
+          reference: cn.credit_note_no,
+          description: cn.reason || "Credit note",
+          debit: 0,
+          credit: Number(cn.amount),
+        });
+      }
+      entries.sort((a, b) => String(a.entry_date).localeCompare(String(b.entry_date)));
+      let running = Number(customer.opening_balance || 0);
+      const ledger = entries.map((e) => {
+        running += Number(e.debit) - Number(e.credit);
+        return { ...e, running_balance: running };
+      });
+      const outstanding = invoices.reduce((s, i) => s + Math.max(0, Number(i.balance)), 0);
+      return wait({
+        success: true,
+        customer,
+        account: {
+          current_balance: outstanding + Number(customer.opening_balance || 0),
+          credit_limit: Number(customer.credit_limit || 0),
+          available_credit: Math.max(0, Number(customer.credit_limit || 0) - outstanding),
+          overdue_balance: 0,
+        },
+        invoices,
+        payments,
+        credit_notes: creditNotes,
+        ledger,
+        opening_balance: Number(customer.opening_balance || 0),
+        closing_balance: running,
+        summary: {
+          opening_balance: Number(customer.opening_balance || 0),
+          total_invoices: invoices.reduce((s, i) => s + Number(i.total), 0),
+          total_payments: payments.reduce((s, p) => s + Number(p.amount), 0),
+          total_credit_notes: creditNotes.reduce((s, c) => s + Number(c.amount), 0),
+          closing_balance: running,
+          outstanding_balance: outstanding,
+        },
+        filters: { start_date: start_date || null, end_date: end_date || null },
+      });
+    },
+    createCreditNote: (params = {}) => {
+      const customer = db.customers.find((c) => Number(c.id) === Number(params.customer_id));
+      if (!customer) return wait({ success: false, error: "Customer not found." });
+      const amount = Number(params.amount || 0);
+      if (!(amount > 0)) return wait({ success: false, error: "Amount required." });
+      const note = {
+        id: nextId("customerCreditNote"),
+        company_id: customer.company_id || 1,
+        customer_id: customer.id,
+        invoice_id: params.invoice_id || null,
+        credit_note_no: `CN-${new Date().getFullYear()}-${String(nextId("customerCN")).padStart(5, "0")}`,
+        amount,
+        reason: params.reason || "",
+        created_at: nowIso(),
+      };
+      db.customerCreditNotes = db.customerCreditNotes || [];
+      db.customerCreditNotes.push(note);
+      if (params.invoice_id) {
+        const inv = (db.customerInvoices || []).find((i) => Number(i.id) === Number(params.invoice_id));
+        if (inv) {
+          const apply = Math.min(amount, Number(inv.balance));
+          inv.amount_paid = Number(inv.amount_paid) + apply;
+          inv.balance = Math.max(0, Number(inv.total) - inv.amount_paid);
+          inv.status = inv.balance <= 0 ? "paid" : "partially_paid";
+        }
+      }
+      logAudit("customer_credit_note", "receivables", { credit_note_id: note.id, amount });
+      persist();
+      return wait({ success: true, credit_note: note });
+    },
+    getInvoice: ({ id } = {}) => {
+      const invoice = (db.customerInvoices || []).find((i) => Number(i.id) === Number(id));
+      if (!invoice) return wait({ success: false, error: "Invoice not found." });
+      return wait({
+        success: true,
+        invoice,
+        items: (db.customerInvoiceItems || []).filter((x) => Number(x.invoice_id) === Number(id)),
+        allocations: (db.customerPaymentAllocations || []).filter((x) => Number(x.invoice_id) === Number(id)),
+      });
+    },
+    emailStatement: () => wait({ success: true, message: "Statement queued (mock)." }),
+  },
   suppliers: {
     getAll: (params = {}) => {
       const includeDeleted = params.include_deleted === true;
@@ -2779,18 +3313,63 @@ const rawApi = {
       ]
         .sort((a, b) => String(b.date).localeCompare(String(a.date)))
         .slice(0, 10);
+      const aging = buildSupplierAgingMock();
       return wait({
         total_suppliers: list.length,
         active_suppliers: active.length,
         outstanding_balance: list.reduce((sum, s) => sum + Number(s.balance || 0), 0),
+        outstanding_payables: aging.total_payables,
+        overdue_payables: aging.overdue_amount,
         total_purchases: list.reduce((sum, s) => sum + Number(s.total_ordered || 0), 0),
         total_payments: list.reduce((sum, s) => sum + Number(s.total_paid || 0), 0),
         outstanding_count: list.filter((s) => Number(s.balance) > 0).length,
+        aging_buckets: aging.buckets,
         recent_transactions: recent,
       });
     },
+    getAging: () => wait(buildSupplierAgingMock()),
+    getPayables: (params = {}) => {
+      const today = new Date();
+      let rows = (db.purchases || []).filter((p) => !["Cancelled", "Rejected", "Draft"].includes(p.status));
+      if (params.supplier_id) rows = rows.filter((p) => Number(p.supplier_id) === Number(params.supplier_id));
+      if (params.open_only !== false) rows = rows.filter((p) => Number(p.balance) > 0);
+      return wait({
+        success: true,
+        invoices: rows.map((p) => {
+          const due = p.due_date || p.payment_due_date;
+          return {
+            ...p,
+            payment_status: derivePaymentStatusMock(p, today),
+            days_overdue: due ? Math.max(0, daysBetweenMock(due, today)) : 0,
+            remaining_balance: Number(p.balance) || 0,
+            due_date: due,
+          };
+        }),
+      });
+    },
+    getInsights: () => wait(buildSupplierInsightsMock()),
+    getEnterpriseDashboard: async () => {
+      const base = await rawApi.suppliers.getDashboard();
+      const aging = buildSupplierAgingMock();
+      const insights = buildSupplierInsightsMock();
+      return {
+        ...base,
+        success: true,
+        outstanding_payables: aging.total_payables,
+        overdue_payables: aging.overdue_amount,
+        aging_buckets: aging.buckets,
+        insights_preview: {
+          best_by_price: insights.best_by_price?.[0] || null,
+          most_reliable: insights.most_reliable?.[0] || null,
+          suggested_supplier: insights.suggested_supplier || null,
+          reorder_alerts: insights.suggested_reorder?.length || 0,
+        },
+      };
+    },
     getReports: () => {
       const list = db.suppliers.filter((s) => !s.deleted_at);
+      const aging = buildSupplierAgingMock();
+      const insights = buildSupplierInsightsMock();
       return wait({
         outstanding: list
           .filter((s) => Number(s.balance) > 0)
@@ -2812,6 +3391,7 @@ const rawApi = {
           supplier_id: p.supplier_id,
           supplier: db.suppliers.find((s) => s.id === Number(p.supplier_id))?.name || "—",
           status: p.status,
+          payment_status: derivePaymentStatusMock(p),
           total: Number(p.total) || 0,
           amount_paid: Number(p.amount_paid) || 0,
           balance: Number(p.balance) || 0,
@@ -2841,6 +3421,14 @@ const rawApi = {
             balance: Number(s.balance) || 0,
             order_count: Number(s.order_count) || 0,
           })),
+        aging,
+        insights,
+        purchase_summary: {
+          total_pos: (db.purchases || []).length,
+          open_payables: (db.purchases || []).filter((p) => Number(p.balance) > 0).length,
+          overdue_count: aging.invoices.filter((p) => p.payment_status === "overdue").length,
+          overdue_amount: aging.overdue_amount,
+        },
       });
     },
     create: (supplier) => {
@@ -3164,6 +3752,106 @@ const rawApi = {
       const supplier = db.suppliers.find((s) => s.id === Number(supplier_id));
       logAudit("supplier_statement_email", "suppliers", { supplier_id, supplier: supplier?.name });
       return wait({ success: true, id: `demo-${Date.now()}`, provider: "demo" });
+    },
+  },
+  purchaseRequests: {
+    list: (params = {}) => {
+      let rows = db.purchaseRequests || [];
+      if (params.status) rows = rows.filter((r) => r.status === params.status);
+      return wait({ success: true, requests: [...rows].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))) });
+    },
+    get: (id) => {
+      const request = (db.purchaseRequests || []).find((r) => Number(r.id) === Number(id));
+      if (!request) return wait({ success: false, error: "Request not found." });
+      const items = (db.purchaseRequestItems || []).filter((i) => Number(i.request_id) === Number(id));
+      return wait({ success: true, request, items });
+    },
+    create: (payload = {}) => {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (!items.length) return wait({ success: false, error: "Add at least one line item." });
+      const year = new Date().getFullYear();
+      const seq = (db.purchaseRequests || []).filter((r) => String(r.request_no || "").includes(`PR-${year}-`)).length + 1;
+      const requestNo = payload.request_no || `PR-${year}-${String(seq).padStart(5, "0")}`;
+      const id = nextId("purchaseRequest");
+      const request = {
+        id,
+        request_no: requestNo,
+        supplier_id: payload.supplier_id || null,
+        branch_id: payload.branch_id || 1,
+        warehouse_id: payload.warehouse_id || null,
+        status: payload.submit ? "Submitted" : "Draft",
+        notes: payload.notes || "",
+        required_date: payload.required_date || null,
+        purchase_id: null,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      db.purchaseRequests = db.purchaseRequests || [];
+      db.purchaseRequestItems = db.purchaseRequestItems || [];
+      db.purchaseRequests.unshift(request);
+      for (const it of items) {
+        db.purchaseRequestItems.push({
+          id: nextId("purchaseRequestItem"),
+          request_id: id,
+          product_id: it.product_id || null,
+          description: it.description || it.name || "Item",
+          qty: Number(it.qty) || 1,
+          estimated_cost: Number(it.estimated_cost ?? it.cost ?? it.price) || 0,
+        });
+      }
+      logAudit("purchase_request_create", "purchases", { request_id: id, request_no: requestNo });
+      persist();
+      return wait({ success: true, request, items: db.purchaseRequestItems.filter((i) => i.request_id === id) });
+    },
+    convert: async (payload = {}) => {
+      const requestId = Number(payload.id || payload.request_id);
+      const request = (db.purchaseRequests || []).find((r) => Number(r.id) === requestId);
+      if (!request) return wait({ success: false, error: "Purchase request not found." });
+      if (request.status === "Converted" && request.purchase_id) {
+        return wait({ success: true, purchase_id: request.purchase_id, already_converted: true });
+      }
+      const supplierId = payload.supplier_id || request.supplier_id;
+      if (!supplierId) return wait({ success: false, error: "Assign a supplier before converting to a Purchase Order." });
+      const items = (db.purchaseRequestItems || []).filter((i) => Number(i.request_id) === requestId);
+      if (!items.length) return wait({ success: false, error: "Request has no lines." });
+      const createResult = await rawApi.purchases.create({
+        supplier_id: supplierId,
+        items: items.map((it) => ({
+          product_id: it.product_id,
+          qty: it.qty,
+          cost: it.estimated_cost,
+          discount: 0,
+          tax: 0,
+        })),
+        status: "Pending",
+        notes: request.notes ? `From ${request.request_no}: ${request.notes}` : `From ${request.request_no}`,
+        branch_id: request.branch_id,
+        warehouse_id: request.warehouse_id,
+      });
+      if (!createResult?.success && createResult?.id == null) {
+        return wait(createResult?.error ? createResult : { success: false, error: "Failed to create purchase order." });
+      }
+      const purchaseId = createResult.id || createResult.purchase?.id;
+      request.status = "Converted";
+      request.purchase_id = purchaseId;
+      request.supplier_id = supplierId;
+      request.updated_at = nowIso();
+      logAudit("purchase_request_convert", "purchases", { request_id: requestId, purchase_id: purchaseId });
+      persist();
+      return wait({ success: true, request_id: requestId, purchase_id: purchaseId, purchase: createResult });
+    },
+    updateStatus: (payload = {}) => {
+      const status = String(payload.status || "");
+      if (!["Draft", "Submitted", "Cancelled", "Rejected"].includes(status)) {
+        return wait({ success: false, error: "Invalid status." });
+      }
+      const request = (db.purchaseRequests || []).find((r) => Number(r.id) === Number(payload.id));
+      if (!request) return wait({ success: false, error: "Request not found." });
+      if (request.status === "Converted") return wait({ success: false, error: "Converted requests cannot change status." });
+      request.status = status;
+      request.updated_at = nowIso();
+      persist();
+      return wait({ success: true, request });
     },
   },
   purchases: {
@@ -3632,23 +4320,35 @@ const rawApi = {
     createReturn: (ret) => {
       const id = nextId("purchaseReturn");
       const purchase = db.purchases.find((item) => item.id === ret.purchase_id);
-      if (!purchase || !["Received", "PartiallyReceived"].includes(purchase.status)) {
-        return wait({ success: false, error: "Only received purchases can be returned." });
+      if (!purchase || !["Received", "PartiallyReceived", "Approved"].includes(purchase.status)) {
+        return wait({ success: false, error: "Only approved/received purchases can be returned." });
       }
+      const line = (purchase.items || []).find((it) => Number(it.product_id) === Number(ret.product_id));
+      const qty = Number(ret.qty) || 0;
+      const cost = Number(ret.cost != null ? ret.cost : line?.cost) || 0;
       db.purchaseReturns.unshift({
         id,
         ...ret,
+        qty,
+        cost,
         supplier_id: ret.supplier_id || purchase.supplier_id || null,
         branch_id: ret.branch_id || purchase.branch_id || null,
         created_at: nowIso(),
       });
       db.products = db.products.map((product) =>
-        product.id === ret.product_id ? { ...product, stock: Math.max(0, product.stock - ret.qty) } : product
+        Number(product.id) === Number(ret.product_id)
+          ? { ...product, stock: Math.max(0, Number(product.stock) - qty) }
+          : product
       );
+      // Reduce open invoice balance; supplier outstanding uses returnsCredit in recompute.
+      const credit = qty * cost;
+      if (credit > 0) {
+        purchase.balance = Math.max(0, Number(purchase.balance || 0) - credit);
+      }
       if (purchase?.supplier_id) {
         recomputeSupplierBalanceMock(purchase.supplier_id);
       }
-      logAudit("purchase_return", "purchases", { id });
+      logAudit("purchase_return", "purchases", { id, qty, cost, credit });
       persist();
       return wait({ success: true, id });
     },
@@ -4445,6 +5145,7 @@ const rawApi = {
       );
       const outOfStock = products.filter((p) => Number(p.stock || 0) <= 0).length;
       const outstandingPayables = suppliers.reduce((sum, s) => sum + Math.max(0, Number(s.balance || 0)), 0);
+      const aging = buildSupplierAgingMock();
       const outstandingReceivables = customers.reduce((sum, c) => sum + Math.max(0, Number(c.balance || 0)), 0);
 
       const topCustomers = [...customers]
@@ -4479,6 +5180,7 @@ const rawApi = {
         total_suppliers: suppliers.length,
         outstanding_receivables: outstandingReceivables,
         outstanding_payables: outstandingPayables,
+        overdue_payables: aging.overdue_amount,
         top_customers: topCustomers,
         top_suppliers: topSuppliers,
         monthly_purchases: monthlyPurchases,

@@ -21,6 +21,9 @@
     "test:feature-smoke": "node scripts/feature-smoke.mjs",
     "test:runtime-api": "node scripts/runtime-api-smoke.mjs",
     "test:purchase-approve": "node scripts/purchase-approve-e2e-test.mjs",
+    "test:enterprise-supplier": "node scripts/enterprise-supplier-e2e-test.mjs",
+    "test:receivables": "node scripts/customer-receivables-e2e-test.mjs",
+    "test:credit-sale-auto": "node scripts/credit-sale-auto-e2e-test.mjs",
     "test:purchase-receive": "node scripts/purchase-receive-e2e-test.mjs",
     "test:purchase-guard": "node scripts/purchase-receive-guard-test.mjs",
     "verify:rls": "node scripts/verify-rls.mjs",
@@ -29,7 +32,16 @@
     "deploy": "node scripts/deploy.mjs",
     "electron": "electron ./electron/main.cjs",
     "electron:dev": "electron ./electron/main.cjs --dev",
-    "electron:build": "vite build && electron-builder --win"
+    "electron:local": "electron ./electron/main.cjs --local",
+    "env:pull:production": "node scripts/pull-production-env.mjs",
+    "env:resolve:supabase": "node scripts/resolve-supabase-public-env.mjs",
+    "electron:build": "node scripts/build-electron-win.mjs",
+    "electron:build:win": "node scripts/build-electron-win.mjs",
+    "electron:verify": "node scripts/verify-electron-desktop.mjs",
+    "electron:verify:packaged": "node scripts/verify-packaged-exe.mjs",
+    "electron:verify:login-config": "node scripts/verify-packaged-supabase.mjs",
+    "electron:verify:api": "node scripts/probe-electron-api-auth.mjs",
+    "electron:e2e": "node scripts/e2e-electron-full.mjs"
   },
   "build": {
     "appId": "com.nexorapos.app",
@@ -42,6 +54,10 @@
       "dist/**/*",
       "package.json"
     ],
+    "asar": true,
+    "asarUnpack": [
+      "dist/**"
+    ],
     "win": {
       "target": [
         "nsis",
@@ -50,7 +66,13 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Nexora-POS-Setup-${version}.${ext}",
+      "shortcutName": "Nexora POS Pro",
+      "uninstallDisplayName": "Nexora POS Pro"
+    },
+    "portable": {
+      "artifactName": "Nexora-POS-Portable-${version}.${ext}"
     }
   },
   "dependencies": {

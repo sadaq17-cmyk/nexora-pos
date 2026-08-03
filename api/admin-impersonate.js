@@ -1,6 +1,7 @@
 import {
   applySecurityHeaders,
   createAdminClient,
+  beginApiRequest,
   isAllowedOrigin,
   verifyCallerFromRequest,
   parseBody,
@@ -52,9 +53,7 @@ async function writeImpersonationAudit(admin, { caller, target, companyId }) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST") return methodNotAllowed(res);
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST"] })) return;
 
   const verified = await verifyCallerFromRequest(req);
   if (verified.error) return jsonError(res, verified.status, verified.error);

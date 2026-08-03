@@ -32,10 +32,12 @@ const statusColors = {
   Rejected: ["#9F1239", "#FFE4E6"],
 };
 
-/** UI labels — Pending = Pending Approval; Ordered legacy = Approved. */
+/** UI labels — Draft = Purchase Request; Pending = Pending Approval; Ordered legacy = Approved. */
 function statusLabel(status) {
+  if (status === "Draft") return "Purchase Request";
   if (status === "Pending") return "Pending Approval";
-  if (status === "Ordered" || status === "Approved") return "Approved";
+  if (status === "Ordered" || status === "Approved") return "Approved / Invoice";
+  if (status === "Received") return "GRN Received";
   if (status === "PartiallyReceived") return "Partial / Back Order";
   if (status === "Rejected") return "Rejected";
   return status || "—";
@@ -1512,6 +1514,7 @@ export default function Purchases() {
         </div>
         <div className="flex flex-wrap gap-2">
           {["all", "Draft", "Pending", "Approved", "Ordered", "PartiallyReceived", "Received", "Rejected", "Cancelled"].map((s) => (
+            /* Draft filter = Purchase Requests in the automated workflow */
             <button
               key={s}
               type="button"
@@ -1843,7 +1846,7 @@ export default function Purchases() {
                   onClick={() => submitPurchase("Draft")}
                 >
                   {savingPo ? <Loader2 size={15} className="animate-spin" /> : <FileText size={15} />}
-                  Save Draft
+                  Save Purchase Request
                 </button>
               )}
               <button type="submit" className="btn btn-primary flex-1" disabled={savingPo || !supplierId}>

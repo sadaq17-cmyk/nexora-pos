@@ -1,15 +1,13 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 
-/** Live SaaS origin (Vercel). Do not reuse ELECTRON_START_URL here — that is for dev only. */
-const PRODUCTION_ORIGIN = (
+/** API origin only — shell HTML is always local dist/index.html */
+const API_ORIGIN = (
   process.env.NEXORA_WEB_ORIGIN ||
   'https://www.nexorapospro.com'
 ).replace(/\/$/, '');
-
-/** Packaged desktop always opens Login on the live site (BrowserRouter + /api work). */
-const PRODUCTION_LOGIN_URL = `${PRODUCTION_ORIGIN}/login`;
 
 const DEV_URL = (
   process.env.VITE_DEV_SERVER_URL ||
@@ -25,6 +23,7 @@ const isDev =
 
 const MAX_DEV_RETRIES = 40;
 const DEV_RETRY_MS = 750;
+const LOAD_TIMEOUT_MS = 60000;
 
 function logPath() {
   try {
@@ -66,125 +65,193 @@ ${detail ? `<p class="detail">${detail}</p>` : ''}
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
 
-/**
- * Local dist via file:// MUST use a hash URL so React HashRouter can match /login.
- * BrowserRouter + file:// pathname (filesystem path) → NotFound 404.
- */
-function getLocalLoginFileUrl() {
-  const root = app.isPackaged
-    ? app.getAppPath()
-    : path.join(__dirname, '..');
-  const distIndex = path.join(root, 'dist', 'index.html');
-  if (!fs.existsSync(distIndex)) return null;
-  const fileUrl = 'file:///' + distIndex.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '$1:');
-  // Ensure three slashes after file: for Windows paths
-  const normalized = distIndex.startsWith('/')
-    ? `file://${distIndex}`
-    : `file:///${distIndex.replace(/\\/g, '/')}`;
-  return `${normalized}#/login`;
-}
-
-async function loadDevUrl(win) {
-  const url = DEV_URL.includes('://') ? DEV_URL : `http://${DEV_URL}`;
-  let lastError = null;
-  for (let attempt = 1; attempt <= MAX_DEV_RETRIES; attempt++) {
-    if (win.isDestroyed()) return;
-    try {
-      log('loadURL(dev)', url, `attempt=${attempt}`);
-      await win.loadURL(url);
-      log('loaded', win.webContents.getURL());
-      return;
-    } catch (err) {
-      lastError = err;
-      log('dev load failed', err.message || err);
-      if (attempt < MAX_DEV_RETRIES) await sleep(DEV_RETRY_MS);
+/** Resolve packaged/unpacked dist/index.html on disk (never an HTTP URL). */
+function resolveDistIndexPath() {
+  const candidates = [];
+  if (app.isPackaged) {
+    const appPath = app.getAppPath(); // .../app.asar
+    // Prefer asarUnpack real files for reliable file:// ES module loads.
+    candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'index.html'));
+    candidates.push(path.join(`${appPath}.unpacked`, 'dist', 'index.html'));
+    candidates.push(path.join(appPath, 'dist', 'index.html'));
+    candidates.push(path.join(process.resourcesPath, 'dist', 'index.html'));
+  } else {
+    candidates.push(path.join(__dirname, '..', 'dist', 'index.html'));
+  }
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      log('dist/index.html found at', p);
+      return p;
     }
   }
-  await win.loadURL(
-    errorPage(
-      `Could not reach Vite at <code>${url}</code>. Run <code>npm run dev</code> then retry.`,
-      lastError && lastError.message
-    )
-  );
+  log('dist/index.html NOT FOUND. tried=', candidates.join(' | '));
+  return null;
 }
 
-async function loadPackagedProduction(win) {
-  const url = PRODUCTION_LOGIN_URL;
-  log('packaged startup → production login', url);
+function getLoginFileUrl() {
+  const indexPath = resolveDistIndexPath();
+  if (!indexPath) return null;
+  const html = fs.readFileSync(indexPath, 'utf8');
+  if (html.includes('/src/main.jsx')) {
+    log('FATAL: dist is Vite DEV entry');
+    return null;
+  }
+  // Always HashRouter login — never load bare index without hash.
+  return `${pathToFileURL(indexPath).href}#/login`;
+}
+
+function classifyRenderer(info) {
+  const text = String(info?.bodyText || '');
+  const href = String(info?.href || '');
+  const has404 =
+    (/That page does(?: not|n't) exist/i.test(text) ||
+      (/\b404\b/.test(text) && /does(?: not|n't) exist/i.test(text))) &&
+    !/Sign in/i.test(text);
+  const hasLogin = /Sign in/i.test(text) && /Password/i.test(text);
+  return {
+    has404,
+    hasLogin,
+    href,
+    protocol: info?.protocol,
+    hash: info?.hash,
+    forceHash: info?.forceHash,
+    desktopBuild: info?.desktopBuild,
+    text: text.slice(0, 220),
+  };
+}
+
+async function readRenderer(win) {
   try {
-    await win.loadURL(url);
-    log('loaded', win.webContents.getURL());
-    return true;
-  } catch (err) {
-    log('production loadURL threw', err.message || err);
-    return false;
-  }
-}
-
-async function loadLocalHashLogin(win) {
-  const url = getLocalLoginFileUrl();
-  if (!url) {
-    log('local dist missing');
-    return false;
-  }
-  log('fallback local hash login', url);
-  try {
-    await win.loadURL(url);
-    log('loaded', win.webContents.getURL());
-    return true;
-  } catch (err) {
-    log('local loadURL failed', err.message || err);
-    return false;
-  }
-}
-
-function wireNavigationLogs(win) {
-  const wc = win.webContents;
-
-  wc.on('did-start-navigation', (_e, url, isInPlace, isMainFrame) => {
-    if (isMainFrame) log('did-start-navigation', url, `inPlace=${isInPlace}`);
-  });
-
-  wc.on('will-redirect', (_e, url) => {
-    log('will-redirect', url);
-  });
-
-  wc.on('did-redirect-navigation', (_e, url, isInPlace, isMainFrame) => {
-    if (isMainFrame) log('did-redirect-navigation', url);
-  });
-
-  wc.on('did-navigate', (_e, url) => {
-    log('did-navigate', url);
-  });
-
-  wc.on('did-navigate-in-page', (_e, url, isMainFrame) => {
-    if (isMainFrame) log('did-navigate-in-page', url);
-  });
-
-  wc.on('did-finish-load', () => {
-    log('did-finish-load', wc.getURL());
-    // Capture whether NotFound text is present
-    wc.executeJavaScript(
+    return await win.webContents.executeJavaScript(
       `({
         href: location.href,
         protocol: location.protocol,
         pathname: location.pathname,
         hash: location.hash,
-        title: document.title,
-        bodyText: (document.body && document.body.innerText || '').slice(0, 500)
+        bodyText: (document.body && document.body.innerText || '').slice(0, 1000),
+        forceHash: Boolean(window.__NEXORA_FORCE_HASH__ || (window.nexoraDesktop && window.nexoraDesktop.forceHashRouter)),
+        desktopBuild: Boolean(window.__NEXORA_DESKTOP_BUILD__),
+        hasDesktop: Boolean(window.nexoraDesktop)
       })`
-    )
-      .then((info) => log('renderer-location', JSON.stringify(info)))
-      .catch((err) => log('renderer-location failed', err.message || err));
+    );
+  } catch (err) {
+    log('readRenderer failed', err.message || err);
+    return null;
+  }
+}
+
+function loadUrlReliable(win, url, { timeoutMs = LOAD_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    const wc = win.webContents;
+    let settled = false;
+
+    const done = async (networkOk, reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      wc.removeListener('did-fail-load', onFail);
+      wc.removeListener('did-finish-load', onFinish);
+
+      let info = await readRenderer(win);
+      let cls = classifyRenderer(info || {});
+      for (let i = 0; i < 40 && networkOk && !cls.has404 && !cls.hasLogin; i++) {
+        await sleep(350);
+        info = await readRenderer(win);
+        cls = classifyRenderer(info || {});
+        if (cls.hasLogin || cls.has404) break;
+      }
+      const ok = Boolean(networkOk) && cls.hasLogin && !cls.has404 && String(cls.hash || '').includes('/login');
+      log('loadUrlReliable', JSON.stringify({ url, networkOk, reason, ok, ...cls }));
+      resolve({ ok, reason, info, cls, url: wc.getURL() });
+    };
+
+    const onFail = (_e, code, desc, _u, isMain) => {
+      if (!isMain || code === -3) return;
+      done(false, `did-fail-load ${code} ${desc}`);
+    };
+    const onFinish = () => done(true, 'did-finish-load');
+    const timer = setTimeout(() => done(false, 'timeout'), timeoutMs);
+
+    wc.on('did-fail-load', onFail);
+    wc.on('did-finish-load', onFinish);
+    // Prefer loadURL(file…#/login). Never loadFile() (drops hash → 404).
+    win.loadURL(url).catch((err) => done(false, err.message || String(err)));
+  });
+}
+
+async function loadDevUrl(win) {
+  const url = DEV_URL.includes('://') ? DEV_URL : `http://${DEV_URL}`;
+  for (let attempt = 1; attempt <= MAX_DEV_RETRIES; attempt++) {
+    if (win.isDestroyed()) return;
+    log('dev load', url, attempt);
+    const result = await loadUrlReliable(win, `${url}/#/login`, { timeoutMs: 8000 });
+    if (result.ok) return;
+    await sleep(DEV_RETRY_MS);
+  }
+  await win.loadURL(errorPage(`Could not reach Vite at <code>${url}</code>.`, 'Run npm run dev'));
+}
+
+async function loadProductionDistLogin(win) {
+  const fileUrl = getLoginFileUrl();
+  if (!fileUrl) return false;
+  log('production entry (local dist/index.html#/login) →', fileUrl);
+  if (/^https?:/i.test(fileUrl)) {
+    log('REFUSING http(s) shell URL');
+    return false;
+  }
+  const first = await loadUrlReliable(win, fileUrl);
+  if (first.ok) return true;
+  log('retry local login once');
+  await sleep(800);
+  const second = await loadUrlReliable(win, fileUrl);
+  return second.ok;
+}
+
+function wireGuards(win) {
+  const wc = win.webContents;
+
+  wc.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url) || url.startsWith('mailto:')) {
+      shell.openExternal(url).catch(() => null);
+    }
+    return { action: 'deny' };
   });
 
-  wc.on(
-    'did-fail-load',
-    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-      if (!isMainFrame || errorCode === -3) return;
-      log('did-fail-load', errorCode, errorDescription, validatedURL);
+  wc.on('will-navigate', (event, url) => {
+    log('will-navigate', url);
+    // Shell must stay on local file dist. External http opens in browser.
+    if (url.startsWith('file:')) {
+      if (!url.includes('#/')) {
+        event.preventDefault();
+        const fixed = getLoginFileUrl();
+        if (fixed) win.loadURL(fixed).catch(() => null);
+      }
+      return;
     }
-  );
+    if (/^https?:/i.test(url)) {
+      event.preventDefault();
+      shell.openExternal(url).catch(() => null);
+    }
+  });
+
+  wc.on('did-finish-load', () => {
+    readRenderer(win).then((info) => {
+      const cls = classifyRenderer(info || {});
+      log('did-finish-load state', JSON.stringify(cls));
+      if (cls.has404 || (info && !String(info.hash || '').includes('/login') && cls.has404 !== false && /404/.test(cls.text || ''))) {
+        const fixed = getLoginFileUrl();
+        if (fixed && cls.has404) {
+          log('recover 404 →', fixed);
+          win.loadURL(fixed).catch(() => null);
+        }
+      }
+    });
+  });
+
+  wc.on('did-fail-load', (_e, code, desc, validated, isMain) => {
+    if (!isMain || code === -3) return;
+    log('did-fail-load', code, desc, validated);
+  });
 }
 
 async function startWindow(win) {
@@ -195,28 +262,16 @@ async function startWindow(win) {
     return;
   }
 
-  if (app.isPackaged) {
-    log('mode=packaged', 'userData=' + app.getPath('userData'));
-    const ok = await loadPackagedProduction(win);
-    if (ok) return;
-
-    // Only if production URL failed to start loading — try hash file URL (not loadFile).
-    const localOk = await loadLocalHashLogin(win);
-    if (!localOk) {
-      await win.loadURL(
-        errorPage(
-          `Could not open <code>${PRODUCTION_LOGIN_URL}</code>. Check your internet connection and try again.`,
-          `Also missing local dist fallback.`
-        )
-      );
-    }
-    return;
+  log('mode=' + (app.isPackaged ? 'packaged' : 'unpackaged'), 'resources=', process.resourcesPath);
+  const ok = await loadProductionDistLogin(win);
+  if (!ok) {
+    await win.loadURL(
+      errorPage(
+        'Could not load local <code>dist/index.html#/login</code>.',
+        'Rebuild with npm run electron:build:win so dist is packaged.'
+      )
+    );
   }
-
-  // Unpackaged production smoke: prefer live site, then local hash
-  log('mode=unpackaged-prod');
-  const ok = await loadPackagedProduction(win);
-  if (!ok) await loadLocalHashLogin(win);
 }
 
 function createWindow() {
@@ -226,7 +281,8 @@ function createWindow() {
     /* ignore */
   }
   log('=== Nexora Electron start ===');
-  log('isPackaged=', app.isPackaged, 'execPath=', process.execPath);
+  log('isPackaged=', app.isPackaged);
+  log('API_ORIGIN=', API_ORIGIN, '(API only; shell is local dist)');
 
   const win = new BrowserWindow({
     width: 1280,
@@ -238,20 +294,49 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      // Local file:// ES modules from dist/assets
+      webSecurity: true,
     },
   });
 
-  wireNavigationLogs(win);
-
+  wireGuards(win);
   win.once('ready-to-show', () => {
     if (!win.isDestroyed()) win.show();
   });
-
   startWindow(win);
   return win;
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('nexora:get-printers', async (event) => {
+    try {
+      const listed = await event.sender.getPrintersAsync();
+      return (listed || []).map((p) => ({
+        name: p.name,
+        displayName: p.displayName || p.name,
+        isDefault: Boolean(p.isDefault),
+        status: p.status,
+      }));
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle('nexora:print-receipt', async (event, opts = {}) => {
+    try {
+      const deviceName = String(opts.deviceName || opts.printer_name || '').trim();
+      await new Promise((resolve, reject) => {
+        event.sender.print(
+          { silent: true, printBackground: true, deviceName: deviceName || undefined },
+          (success, reason) => (success ? resolve() : reject(new Error(reason || 'Print failed')))
+        );
+      });
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message || 'Print failed' };
+    }
+  });
+
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

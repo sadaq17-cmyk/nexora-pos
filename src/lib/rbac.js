@@ -112,6 +112,13 @@ export const SYSTEM_ROLES = [
     system: true,
   },
   {
+    id: "procurement_officer",
+    label: "Procurement Officer",
+    description: "Create purchase requests and POs, manage suppliers; approvals by Manager/Owner.",
+    color: "#0F766E",
+    system: true,
+  },
+  {
     id: "cashier",
     label: "Cashier",
     description: "POS checkout only.",
@@ -121,11 +128,15 @@ export const SYSTEM_ROLES = [
 ];
 
 /** Roles Admin may create / manage (Managers + Staff only — never Owner/Admin peers) */
-export const ADMIN_MANAGEABLE_ROLES = Object.freeze(["branch_manager", "cashier", "sales", "inventory_manager", "accountant"]);
+export const ADMIN_MANAGEABLE_ROLES = Object.freeze([
+  "branch_manager", "cashier", "sales", "inventory_manager", "accountant", "procurement_officer",
+]);
 /** Manager cannot manage users/roles per enterprise matrix */
 export const MANAGER_MANAGEABLE_ROLES = Object.freeze([]);
 /** Primary roles Company Owner creates for store staff */
-export const OWNER_PRIMARY_ROLES = Object.freeze(["admin", "branch_manager", "cashier", "sales"]);
+export const OWNER_PRIMARY_ROLES = Object.freeze([
+  "admin", "branch_manager", "cashier", "sales", "accountant", "procurement_officer",
+]);
 /** Account-status values for enterprise user lifecycle */
 export const ACCOUNT_STATUSES = Object.freeze(["active", "inactive", "suspended", "locked"]);
 
@@ -162,6 +173,11 @@ export const ROLE_ALIASES = {
   hrmanager: "admin",
   payroll_officer: "accountant",
   payrollofficer: "accountant",
+  procurement_officer: "procurement_officer",
+  procurement: "procurement_officer",
+  procurementofficer: "procurement_officer",
+  purchasing: "procurement_officer",
+  purchasing_officer: "procurement_officer",
 };
 
 export function normalizeRole(role) {
@@ -383,6 +399,10 @@ export function buildDefaultMatrix() {
   cashier.products = { ...emptyPerms(false).products, view: true };
   cashier.barcode = { ...emptyPerms(false).barcode, view: true, create: true };
   cashier.discounts = { ...emptyPerms(false).discounts, view: true, create: true };
+  // AR: view accounts + record customer payments / credit checkout (no customer delete)
+  cashier.customers = {
+    view: true, create: false, edit: true, delete: false, approve: false, print: true, export: false,
+  };
   cashier.payroll = {
     view: true, create: true, edit: false, delete: false, approve: false, print: true, export: false,
   };
@@ -400,6 +420,17 @@ export function buildDefaultMatrix() {
   accountant.payroll.approve = true;
   accountant.settings.edit = true;
 
+  // Procurement Officer: suppliers + purchases + inventory view; no PO approve/receive
+  const procurementOfficer = grant(
+    emptyPerms(false),
+    ["dashboard", "purchases", "suppliers", "products", "categories", "inventory", "reports", "print_reports"],
+    ["view", "create", "edit", "print", "export"]
+  );
+  procurementOfficer.purchases.approve = false;
+  procurementOfficer.purchases.delete = false;
+  procurementOfficer.suppliers.delete = false;
+  procurementOfficer.inventory = { ...emptyPerms(false).inventory, view: true };
+
   return {
     platform_owner: platformOwner,
     owner: allTrue,
@@ -411,6 +442,7 @@ export function buildDefaultMatrix() {
     sales,
     cashier,
     accountant,
+    procurement_officer: procurementOfficer,
   };
 }
 

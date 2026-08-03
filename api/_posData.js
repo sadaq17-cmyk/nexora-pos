@@ -39,6 +39,17 @@ import {
   handlePlatformAction,
 } from "./_platformAdmin.js";
 import { handlePayrollAction } from "./_payroll.js";
+import { handleReceivablesAction } from "./_receivables.js";
+import {
+  loadAutoActions,
+  runCreditSaleAutomation,
+  compensateSale,
+} from "./_creditSaleWorkflow.js";
+import {
+  handleSupplierEnterpriseAction,
+  buildSupplierNotifications,
+  derivePaymentStatus,
+} from "./_supplierEnterprise.js";
 import { notifyPaymentConfirmationSms, notifyInvoiceSms } from "./_smsService.js";
 
 /**
@@ -51,12 +62,13 @@ const DEFAULT_PURCHASE_ACTIONS = Object.freeze({
   owner: { view: true, create: true, edit: true, delete: true, approve: true },
   super_admin: { view: true, create: true, edit: true, delete: true, approve: true },
   admin: { view: true, create: true, edit: true, delete: true, approve: true },
-  branch_manager: { view: true, create: false, edit: false, delete: false, approve: false },
+  branch_manager: { view: true, create: true, edit: true, delete: false, approve: true },
   inventory_manager: { view: true, create: true, edit: true, delete: false, approve: false },
   sales_manager: { view: false, create: false, edit: false, delete: false, approve: false },
   sales: { view: false, create: false, edit: false, delete: false, approve: false },
   cashier: { view: false, create: false, edit: false, delete: false, approve: false },
   accountant: { view: true, create: true, edit: true, delete: false, approve: true },
+  procurement_officer: { view: true, create: true, edit: true, delete: false, approve: false },
 });
 
 async function loadPermissionMatrix(admin, companyId) {
@@ -1226,6 +1238,27 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     if (payrollResult != null) return payrollResult;
   }
 
+  // Customer Credit Invoice / Accounts Receivable (migration 032)
+  if (String(action || "").startsWith("receivables.")) {
+    const arResult = await handleReceivablesAction(admin, caller, action, params);
+    if (arResult != null) return arResult;
+  }
+
+  // Enterprise Supplier Management (migration 033)
+  if (
+    String(action || "").startsWith("purchaseRequests.")
+    || action === "suppliers.getAging"
+    || action === "suppliers.getPayables"
+    || action === "suppliers.getInsights"
+    || action === "suppliers.getEnterpriseDashboard"
+  ) {
+    const entResult = await handleSupplierEnterpriseAction(admin, caller, action, params, {
+      getBaseDashboard: () => handlePosAction(admin, caller, "suppliers.getDashboard", params),
+      createPurchase: (payload) => handlePosAction(admin, caller, "purchases.create", payload),
+    });
+    if (entResult != null) return entResult;
+  }
+
   switch (action) {
     case "health.probe": {
       // Public monitors get a minimal ok signal only. Schema/AI details require auth + owner role.
@@ -2174,6 +2207,26 @@ export async function handlePosAction(admin, caller, action, params = {}) {
     }
 
     case "customers.addPayment": {
+      // Route through AR allocations so payments reduce invoice balances correctly.
+      const arPay = await handleReceivablesAction(admin, caller, "receivables.receivePayment", {
+        customer_id: params.customer_id,
+        amount: params.amount,
+        method: params.method || "Cash",
+        invoice_id: params.invoice_id || null,
+        allocations: params.allocations || null,
+        notes: params.notes || "",
+        reference: params.reference || "",
+        company_id: companyId,
+      });
+      if (arPay && arPay.success !== undefined) {
+        if (!arPay.success && arPay.code === "SCHEMA") {
+          // Tables not migrated yet — fall back to legacy balance-only payment.
+        } else {
+          return arPay.success
+            ? { success: true, balance: arPay.customer_balance, receipt_no: arPay.receipt_no, payment: arPay.payment }
+            : arPay;
+        }
+      }
       const amount = num(params.amount);
       let q = admin.from("customers").select("*").eq("id", params.customer_id);
       q = companyFilter(q, companyId, platform);
@@ -2969,7 +3022,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         .sort((a, b) => String(b.date).localeCompare(String(a.date)))
         .slice(0, 10);
 
-      return {
+      const baseDash = {
         total_suppliers: list.length,
         active_suppliers: active.length,
         outstanding_balance: list.reduce((sum, s) => sum + num(s.balance), 0),
@@ -2977,7 +3030,25 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         total_payments: list.reduce((sum, s) => sum + num(s.total_paid), 0),
         outstanding_count: outstanding.length,
         recent_transactions: recent,
+        top_suppliers: outstanding
+          .slice()
+          .sort((a, b) => num(b.balance) - num(a.balance))
+          .slice(0, 5)
+          .map((s) => ({ id: s.id, name: s.name, total: num(s.balance), balance: num(s.balance) })),
       };
+      try {
+        const enriched = await handleSupplierEnterpriseAction(
+          admin,
+          caller,
+          "suppliers.getEnterpriseDashboard",
+          params,
+          { getBaseDashboard: async () => baseDash }
+        );
+        if (enriched?.success) return enriched;
+      } catch {
+        /* fall through to base */
+      }
+      return baseDash;
     }
 
     case "suppliers.getReports": {
@@ -3009,6 +3080,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           last_payment_at: s.last_payment_at,
         }));
 
+      const today = new Date();
       const purchaseHistory = (purchases || []).map((p) => ({
         id: p.id,
         po_number: p.po_number,
@@ -3016,6 +3088,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         supplier_id: p.supplier_id,
         supplier: nameById[String(p.supplier_id)]?.name || "—",
         status: p.status,
+        payment_status: derivePaymentStatus(p, today),
+        due_date: p.due_date || p.payment_due_date || null,
+        days_overdue: (() => {
+          const due = p.due_date || p.payment_due_date;
+          if (!due || num(p.balance) <= 0) return 0;
+          const ms = today.getTime() - new Date(String(due).slice(0, 10) + "T23:59:59").getTime();
+          return ms > 0 ? Math.floor(ms / 86400000) : 0;
+        })(),
         total: num(p.total),
         amount_paid: num(p.amount_paid),
         balance: num(p.balance),
@@ -3048,7 +3128,31 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           order_count: num(s.order_count),
         }));
 
-      return { outstanding, purchase_history: purchaseHistory, payment_history: paymentHistory, top_suppliers: topSuppliers };
+      let aging = null;
+      let insights = null;
+      try {
+        aging = await handleSupplierEnterpriseAction(admin, caller, "suppliers.getAging", {});
+        insights = await handleSupplierEnterpriseAction(admin, caller, "suppliers.getInsights", {});
+      } catch {
+        /* optional */
+      }
+
+      return {
+        outstanding,
+        purchase_history: purchaseHistory,
+        payment_history: paymentHistory,
+        top_suppliers: topSuppliers,
+        aging: aging?.success ? aging : null,
+        insights: insights?.success ? insights : null,
+        purchase_summary: {
+          total_pos: (purchases || []).length,
+          open_payables: purchaseHistory.filter((p) => num(p.balance) > 0).length,
+          overdue_count: purchaseHistory.filter((p) => p.payment_status === "overdue").length,
+          overdue_amount: purchaseHistory
+            .filter((p) => p.payment_status === "overdue")
+            .reduce((s, p) => s + num(p.balance), 0),
+        },
+      };
     }
 
     case "sales.create": {
@@ -3068,6 +3172,54 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             : null;
       if (saleCompanyId == null) {
         return { success: false, error: "Company context required.", code: "NO_COMPANY" };
+      }
+
+      const autoActions = await loadAutoActions(admin, saleCompanyId);
+      const pmEarly = String(params.payment_method || "").toUpperCase();
+      const isCreditSale = pmEarly === "CREDIT" || pmEarly === "MIXED" || pmEarly === "SPLIT";
+
+      if (isCreditSale && autoActions.auto_update_inventory === false) {
+        return {
+          success: false,
+          error: "Auto Update Inventory is disabled. Enable it in Settings → Auto Actions before posting credit sales.",
+          code: "AUTO_INVENTORY_DISABLED",
+        };
+      }
+
+      // Credit / mixed sales: enforce customer + credit limit before posting.
+      {
+        const creditAmt =
+          pmEarly === "CREDIT"
+            ? num(params.total)
+            : pmEarly === "MIXED" || pmEarly === "SPLIT"
+              ? num(params.credit_amount) || Math.max(0, num(params.total) - num(params.cash_amount))
+              : 0;
+        if (creditAmt > 0) {
+          if (!params.customer_id) {
+            return { success: false, error: "Customer is required for credit sales.", code: "CUSTOMER_REQUIRED" };
+          }
+          let cq = admin.from("customers").select("id,name").eq("id", params.customer_id);
+          cq = companyFilter(cq, saleCompanyId, platform);
+          const { data: creditCustomer } = await cq.maybeSingle();
+          if (!creditCustomer) {
+            return { success: false, error: "Selected customer was not found.", code: "CUSTOMER_REQUIRED" };
+          }
+          const limitCheck = await handleReceivablesAction(admin, caller, "receivables.checkCreditLimit", {
+            customer_id: params.customer_id,
+            credit_amount: creditAmt,
+            company_id: saleCompanyId,
+          });
+          if (limitCheck?.block) {
+            return { success: false, error: limitCheck.error || "Credit limit exceeded.", code: "CREDIT_LIMIT", ...limitCheck };
+          }
+          if (limitCheck?.exceeded && limitCheck?.block !== false && limitCheck?.policy?.block_sales_over_credit_limit !== false) {
+            return {
+              success: false,
+              error: `Credit limit exceeded. Available ${(limitCheck.available_credit ?? 0).toFixed(2)}.`,
+              code: "CREDIT_LIMIT",
+            };
+          }
+        }
       }
 
       // sales.user_id → public.profiles(id). Sync before insert so auth-only users never violate FK.
@@ -3136,28 +3288,31 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       const { data: rpcData, error: rpcError } = await admin.rpc("pos_create_sale", { payload: rpcPayload });
       if (!rpcError && rpcData) {
         const sale = rpcData.sale || rpcData;
-        try {
-          await upsertInvoice(admin, {
-            receipt_no: rpcData.receipt_no || sale.receipt_no,
-            invoice_id: String(rpcData.id || sale.id),
-            company_name: params.company_name || "Nexora POS Pro",
-            branch_name: rpcPayload.branch_name || "",
-            customer_name: params.customer_name || "Walk-in",
-            payment_method: rpcPayload.payment_method,
-            currency_code: rpcPayload.currency_code,
-            currency_symbol: rpcPayload.currency_symbol,
-            total: rpcPayload.total,
-            status: "Valid",
-            items: (params.items || []).map((item) => ({
-              name: item.name,
-              qty: num(item.qty),
-              price: num(item.price),
-            })),
-            sale_date: sale.created_at || new Date().toISOString(),
-            company_id: saleCompanyId,
-          });
-        } catch {
-          /* invoice registry best-effort */
+        const saleId = rpcData.id || sale.id;
+        if (autoActions.auto_create_invoice !== false) {
+          try {
+            await upsertInvoice(admin, {
+              receipt_no: rpcData.receipt_no || sale.receipt_no,
+              invoice_id: String(saleId),
+              company_name: params.company_name || "Nexora POS Pro",
+              branch_name: rpcPayload.branch_name || "",
+              customer_name: params.customer_name || "Walk-in",
+              payment_method: rpcPayload.payment_method,
+              currency_code: rpcPayload.currency_code,
+              currency_symbol: rpcPayload.currency_symbol,
+              total: rpcPayload.total,
+              status: "Valid",
+              items: (params.items || []).map((item) => ({
+                name: item.name,
+                qty: num(item.qty),
+                price: num(item.price),
+              })),
+              sale_date: sale.created_at || new Date().toISOString(),
+              company_id: saleCompanyId,
+            });
+          } catch {
+            /* invoice registry best-effort */
+          }
         }
         // FIFO/FEFO lot consumption after scalar stock already updated by RPC
         try {
@@ -3206,10 +3361,8 @@ export async function handlePosAction(admin, caller, action, params = {}) {
           details: { id: rpcData.id || sale.id, receipt_no: rpcData.receipt_no || sale.receipt_no, total: rpcPayload.total },
         });
 
-        // Best-effort invoice/receipt SMS to the customer (combines payment +
-        // invoice confirmation into a single message to avoid double-billing
-        // the merchant's SMS quota for one transaction).
-        if (params.customer_id) {
+        // Optional SMS — only when Auto Send Receipt is enabled.
+        if (autoActions.auto_send_receipt && params.customer_id) {
           try {
             const { data: customer } = await admin
               .from("customers")
@@ -3219,7 +3372,7 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             if (customer?.phone) {
               await notifyInvoiceSms({
                 phone: customer.phone,
-                invoiceNo: rpcData.receipt_no || sale.receipt_no || rpcData.id || sale.id,
+                invoiceNo: rpcData.receipt_no || sale.receipt_no || saleId,
                 amount: rpcPayload.total,
                 currencySymbol: rpcPayload.currency_symbol,
                 companyName: params.company_name || "Nexora POS Pro",
@@ -3231,7 +3384,54 @@ export async function handlePosAction(admin, caller, action, params = {}) {
             console.warn("[sales.create] invoice SMS failed", smsErr?.message || smsErr);
           }
         }
-        return rpcData;
+
+        const automation = await runCreditSaleAutomation(admin, {
+          companyId: saleCompanyId,
+          caller,
+          sale: {
+            ...sale,
+            id: saleId,
+            receipt_no: rpcData.receipt_no || sale.receipt_no,
+            invoice_no: rpcData.invoice_no || sale.invoice_no || rpcData.receipt_no,
+            customer_id: sale.customer_id || params.customer_id,
+            total: rpcPayload.total,
+            subtotal: rpcPayload.subtotal,
+            vat: rpcPayload.vat,
+            branch_id: sale.branch_id || params.branch_id,
+          },
+          params,
+          autoActions,
+          postJournalEntriesFn: postJournalEntries,
+        });
+
+        if (!automation.success) {
+          await compensateSale(admin, {
+            companyId: saleCompanyId,
+            caller,
+            saleId,
+            items: params.items || [],
+          });
+          return {
+            success: false,
+            error: automation.error || "Credit sale automation failed and was rolled back.",
+            code: automation.code || "CREDIT_AUTOMATION_FAILED",
+          };
+        }
+
+        return {
+          ...rpcData,
+          success: true,
+          id: saleId,
+          invoice_no: automation.ar_invoice_no || rpcData.invoice_no || rpcData.receipt_no || sale.invoice_no,
+          receipt_no: rpcData.receipt_no || sale.receipt_no,
+          ar_invoice_no: automation.ar_invoice_no || null,
+          paid_amount: automation.paid_amount,
+          remaining_balance: automation.remaining_balance,
+          payment_terms_days: automation.payment_terms_days,
+          due_date: automation.due_date,
+          credit_automation: automation,
+          warning: automation.warning || null,
+        };
       }
 
       // Fallback path when RPC / extended columns are not migrated yet
@@ -3351,28 +3551,30 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         status: "Valid",
       };
 
-      try {
-        await upsertInvoice(admin, {
-          receipt_no,
-          invoice_id: String(sale.id),
-          company_name: params.company_name || "Nexora POS Pro",
-          branch_name: params.branch_name || "",
-          customer_name: params.customer_name || "Walk-in",
-          payment_method: params.payment_method || "CASH",
-          currency_code: params.currency_code || "KES",
-          currency_symbol: params.currency_symbol || "Ksh",
-          total: num(params.total),
-          status: "Valid",
-          items: (params.items || []).map((item) => ({
-            name: item.name,
-            qty: num(item.qty),
-            price: num(item.price),
-          })),
-          sale_date: created_at,
-          company_id: saleCompanyId,
-        });
-      } catch {
-        /* best-effort */
+      if (autoActions.auto_create_invoice !== false) {
+        try {
+          await upsertInvoice(admin, {
+            receipt_no,
+            invoice_id: String(sale.id),
+            company_name: params.company_name || "Nexora POS Pro",
+            branch_name: params.branch_name || "",
+            customer_name: params.customer_name || "Walk-in",
+            payment_method: params.payment_method || "CASH",
+            currency_code: params.currency_code || "KES",
+            currency_symbol: params.currency_symbol || "Ksh",
+            total: num(params.total),
+            status: "Valid",
+            items: (params.items || []).map((item) => ({
+              name: item.name,
+              qty: num(item.qty),
+              price: num(item.price),
+            })),
+            sale_date: created_at,
+            company_id: saleCompanyId,
+          });
+        } catch {
+          /* best-effort */
+        }
       }
 
       await writeAudit(admin, {
@@ -3383,11 +3585,70 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         details: { id: sale.id, receipt_no, total: num(params.total) },
       });
 
+      if (autoActions.auto_send_receipt && params.customer_id) {
+        try {
+          const { data: customer } = await admin
+            .from("customers")
+            .select("phone")
+            .eq("id", params.customer_id)
+            .maybeSingle();
+          if (customer?.phone) {
+            await notifyInvoiceSms({
+              phone: customer.phone,
+              invoiceNo: receipt_no,
+              amount: num(params.total),
+              currencySymbol: params.currency_symbol || "Ksh",
+              companyName: params.company_name || "Nexora POS Pro",
+              companyId: saleCompanyId,
+              userId: publicUserId,
+            });
+          }
+        } catch {
+          /* non-blocking */
+        }
+      }
+
+      const automation = await runCreditSaleAutomation(admin, {
+        companyId: saleCompanyId,
+        caller,
+        sale: {
+          ...fullSale,
+          customer_id: params.customer_id || sale.customer_id,
+          total: num(params.total),
+          subtotal: num(params.subtotal),
+          vat: num(params.vat),
+        },
+        params,
+        autoActions,
+        postJournalEntriesFn: postJournalEntries,
+      });
+
+      if (!automation.success) {
+        await compensateSale(admin, {
+          companyId: saleCompanyId,
+          caller,
+          saleId: sale.id,
+          items: lineItems,
+        });
+        return {
+          success: false,
+          error: automation.error || "Credit sale automation failed and was rolled back.",
+          code: automation.code || "CREDIT_AUTOMATION_FAILED",
+        };
+      }
+
       return {
         success: true,
         id: sale.id,
-        invoice_no: receipt_no,
+        invoice_no: automation.ar_invoice_no || receipt_no,
         receipt_no,
+        ar_invoice_no: automation.ar_invoice_no || null,
+        paid_amount: automation.paid_amount,
+        remaining_balance: automation.remaining_balance,
+        payment_terms_days: automation.payment_terms_days,
+        due_date: automation.due_date,
+        credit_automation: automation,
+        warning: automation.warning || null,
         sale: fullSale,
       };
     }
@@ -6698,8 +6959,18 @@ export async function handlePosAction(admin, caller, action, params = {}) {
       return { success: true, settings: next };
     }
 
-    case "settings.getPrinters":
+    case "settings.getPrinters": {
+      // Server cannot enumerate OS printers; desktop app fills this via Electron IPC.
+      // Surface the configured printer name so POS can treat it as available.
+      try {
+        const all = await handlePosAction(admin, caller, "settings.getAll", {});
+        const name = String(all?.printer_name || "").trim();
+        if (name) return [{ name, displayName: name, isDefault: true }];
+      } catch {
+        /* ignore */
+      }
       return [];
+    }
 
     case "reports.getSalesReport": {
       const sales = await handlePosAction(admin, caller, "sales.getRecent", { limit: 500 });
@@ -6851,6 +7122,14 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         total_suppliers: activeSuppliers.length,
         outstanding_receivables: outstandingReceivables,
         outstanding_payables: outstandingPayables,
+        overdue_payables: await (async () => {
+          try {
+            const aging = await handleSupplierEnterpriseAction(admin, caller, "suppliers.getAging", {});
+            return aging?.success ? num(aging.overdue_amount) : 0;
+          } catch {
+            return 0;
+          }
+        })(),
         top_customers: topCustomers,
         top_suppliers: topSuppliers,
         monthly_purchases: monthlyPurchasesTrend,
@@ -7143,8 +7422,9 @@ export async function handlePosAction(admin, caller, action, params = {}) {
         /* ignore */
       }
 
-      items.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-      return { success: true, items: items.slice(0, 40), unread: items.length };
+      const withSupplierAlerts = await buildSupplierNotifications(admin, companyId, items);
+      withSupplierAlerts.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      return { success: true, items: withSupplierAlerts.slice(0, 50), unread: withSupplierAlerts.length };
     }
 
     case "audit.getAll": {

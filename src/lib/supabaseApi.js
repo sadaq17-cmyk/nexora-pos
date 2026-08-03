@@ -4,7 +4,7 @@
  */
 
 import { authFetch } from "./authApi";
-import { resolveApiUrl } from "./desktopRuntime";
+import { desktopApiHeaders, resolveApiUrl } from "./desktopRuntime";
 import { applyPermissionMiddleware } from "./permissionMiddleware";
 import { buildDefaultMatrix, ensurePermissionShape, isPlatformOwner, normalizeRole } from "./rbac";
 import { validateSalePayment } from "./paymentMethods";
@@ -135,7 +135,9 @@ const rawApi = {
     getFeatures: async () => [],
     verifyInvoice: async (invoiceId) => {
       try {
-        const res = await fetch(`/api/invoice-public?id=${encodeURIComponent(invoiceId)}`);
+        const res = await fetch(resolveApiUrl(`/api/invoice-public?id=${encodeURIComponent(invoiceId)}`), {
+          headers: desktopApiHeaders({ Accept: "application/json" }),
+        });
         return res.json();
       } catch (err) {
         return { success: false, error: err?.message || "Verify failed." };
@@ -143,9 +145,9 @@ const rawApi = {
     },
     contact: async (payload = {}) => {
       try {
-        const res = await fetch("/api/send-email", {
+        const res = await fetch(resolveApiUrl("/api/send-email"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: desktopApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ type: "contact", ...payload }),
         });
         return res.json();
@@ -177,7 +179,7 @@ const rawApi = {
       try {
         const res = await fetch(resolveApiUrl("/api/bootstrap-company-owner"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: desktopApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ action: "resolve_company", company_code: code }),
         });
         const data = await res.json().catch(() => null);
@@ -413,6 +415,9 @@ const rawApi = {
         cash_tendered: sale.cash_tendered,
         card_brand: sale.card_brand,
         mpesa_reference: sale.payment_reference,
+        customer_id: sale.customer_id,
+        cash_amount: sale.cash_amount,
+        credit_amount: sale.credit_amount,
       });
       if (!paid.success) {
         return { success: false, error: paid.error, code: "PAYMENT_INVALID" };
@@ -426,6 +431,8 @@ const rawApi = {
         card_brand: paid.card_brand,
         payment_reference: paid.payment_reference,
         split_payments: paid.split_payments,
+        cash_amount: paid.cash_amount,
+        credit_amount: paid.credit_amount,
         company_name: currentUser.company?.name,
         branch_name: currentUser.company?.branch_name || "",
       });
@@ -436,7 +443,9 @@ const rawApi = {
           "inventory.getLowStock",
           "notifications.list",
           "reports.getAnalytics",
-          "sales.getSummary"
+          "sales.getSummary",
+          "customers.getAll",
+          "dashboard.getExtendedStats"
         );
       }
       return result;
@@ -479,10 +488,53 @@ const rawApi = {
     getPurchaseHistory: (id) => posOrEmpty("customers.getPurchaseHistory", { id }, []),
   },
 
+  receivables: {
+    getDashboard: () => pos("receivables.getDashboard", {}),
+    getAging: (params = {}) => pos("receivables.getAging", params),
+    listInvoices: (params = {}) => pos("receivables.listInvoices", params),
+    getOutstanding: (params = {}) => pos("receivables.getOutstanding", params),
+    getAccount: (params) => pos("receivables.getAccount", typeof params === "object" ? params : { customer_id: params }),
+    checkCreditLimit: (params) => pos("receivables.checkCreditLimit", params),
+    createInvoice: async (payload) => {
+      const result = await pos("receivables.createInvoice", payload);
+      invalidateEntityCaches("customers.getAll", "customers.getCount", "dashboard.getExtendedStats");
+      return result;
+    },
+    receivePayment: async (payload) => {
+      const result = await pos("receivables.receivePayment", payload);
+      invalidateEntityCaches("customers.getAll", "customers.getCount", "dashboard.getExtendedStats");
+      return result;
+    },
+    getStatement: (idOrParams) =>
+      pos("receivables.getStatement", typeof idOrParams === "object" ? idOrParams : { id: idOrParams }),
+    createCreditNote: async (payload) => {
+      const result = await pos("receivables.createCreditNote", payload);
+      invalidateEntityCaches("customers.getAll", "dashboard.getExtendedStats");
+      return result;
+    },
+    getInvoice: (id) => pos("receivables.getInvoice", { id }),
+    getPolicy: () => pos("receivables.getPolicy", {}),
+    updatePolicy: (payload) => pos("receivables.updatePolicy", payload),
+    emailStatement: async ({ customer_id, to, pdf_base64, filename, message } = {}) => {
+      try {
+        return await authFetch("/api/send-email", {
+          method: "POST",
+          body: { type: "customer_statement", customer_id, to, pdf_base64, filename, message },
+        });
+      } catch (err) {
+        return { success: false, error: err?.message || "Could not email statement." };
+      }
+    },
+  },
+
   suppliers: {
     getAll: (params = {}) => cachedPos("suppliers.getAll", params, [], LIST_TTL_MS),
     getDashboard: (params = {}) => pos("suppliers.getDashboard", params),
     getReports: (params = {}) => pos("suppliers.getReports", params),
+    getAging: (params = {}) => pos("suppliers.getAging", params),
+    getPayables: (params = {}) => pos("suppliers.getPayables", params),
+    getInsights: (params = {}) => pos("suppliers.getInsights", params),
+    getEnterpriseDashboard: (params = {}) => pos("suppliers.getEnterpriseDashboard", params),
     create: async (supplier) => {
       const result = await pos("suppliers.create", supplier);
       invalidateEntityCaches("suppliers.getAll");
@@ -537,6 +589,22 @@ const rawApi = {
         return { success: false, error: err?.message || "Could not email statement." };
       }
     },
+  },
+
+  purchaseRequests: {
+    list: (params = {}) => pos("purchaseRequests.list", params),
+    get: (id) => pos("purchaseRequests.get", { id }),
+    create: async (payload) => {
+      const result = await pos("purchaseRequests.create", payload);
+      invalidateEntityCaches("purchases.getAll", "notifications.list");
+      return result;
+    },
+    convert: async (payload) => {
+      const result = await pos("purchaseRequests.convert", typeof payload === "object" ? payload : { id: payload });
+      invalidateEntityCaches("purchases.getAll", "purchases.getDashboard", "suppliers.getAll", "notifications.list");
+      return result;
+    },
+    updateStatus: (payload) => pos("purchaseRequests.updateStatus", payload),
   },
 
   purchases: {

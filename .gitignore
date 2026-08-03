@@ -6,6 +6,7 @@ release/
 .env
 .env.*
 !.env.example
+!.env.production
 *.db
 *.db-journal
 *.db-wal
@@ -20,11 +21,11 @@ dist-electron/
 deployment-report.md
 deployments.log
 .env*
+!.env.example
+!.env.production
 
 scripts/.e2e-credentials.json
 .env.local
-
-
 .env.production.local
 
 # Windows installer binaries (publish via GitHub Releases only)

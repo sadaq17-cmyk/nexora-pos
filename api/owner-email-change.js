@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   applySecurityHeaders,
   createAdminClient,
+  beginApiRequest,
   isAllowedOrigin,
   verifyCallerFromRequest,
   parseBody,
@@ -104,9 +105,7 @@ async function applyEmailChange(admin, userId, nextEmail) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST") return methodNotAllowed(res, "POST");
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST"] })) return;
 
   const ip = getClientIp(req);
   if (!consumeRateLimit(`owner-email-change:${ip}`, 10, 60_000)) {

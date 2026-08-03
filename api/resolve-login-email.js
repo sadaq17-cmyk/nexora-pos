@@ -3,6 +3,7 @@ import {
   consumeRateLimit,
   createAdminClient,
   getClientIp,
+  beginApiRequest,
   isAllowedOrigin,
   normalizeRole,
   parseBody,
@@ -19,9 +20,7 @@ function sleep(ms) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST") return methodNotAllowed(res);
-  if (!isAllowedOrigin(req)) return jsonError(res, 403, "Forbidden origin.", "CSRF_ORIGIN");
+  if (beginApiRequest(req, res, { methods: ["POST"] })) return;
 
   const body = parseBody(req);
   const companyId = body.company_id === "platform" || body.scope === "platform"

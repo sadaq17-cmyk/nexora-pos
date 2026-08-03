@@ -1,5 +1,5 @@
 import { requireSupabase, supabaseConfigError, supabaseSession } from "./supabaseClient.js";
-import { resolveApiUrl } from "./desktopRuntime.js";
+import { desktopApiHeaders, resolveApiUrl } from "./desktopRuntime.js";
 
 const SESSION_TIMEOUT_MS = 8_000;
 const DEFAULT_TIMEOUT_MS = 18_000;
@@ -94,10 +94,10 @@ export async function authFetch(path, { method = "GET", body, timeoutMs = DEFAUL
     try {
       const response = await fetch(resolveApiUrl(path), {
         method,
-        headers: {
+        headers: desktopApiHeaders({
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
-        },
+        }),
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
@@ -154,7 +154,7 @@ export async function resolveLoginEmail({ company_id, identifier, scope }) {
   try {
     const response = await fetch(resolveApiUrl("/api/resolve-login-email"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: desktopApiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ company_id, identifier, scope }),
     });
     let data = null;
@@ -200,7 +200,7 @@ export async function publicSignup(payload) {
   try {
     const response = await fetch(resolveApiUrl("/api/bootstrap-company-owner"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: desktopApiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ ...payload, action: "public_signup", public_signup: true }),
     });
     let data = null;

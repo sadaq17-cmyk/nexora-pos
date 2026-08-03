@@ -59,18 +59,32 @@ function drawCode128Vector(doc, value, x, y, maxWidthMm, heightMm = 12) {
   return maxWidthMm;
 }
 
-/**
- * Build a thermal-friendly PDF with vector QR + CODE128 (no rasterization).
- */
-export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurrency) {
+async function buildReceiptPdfDoc(receipt, settings, formatMoneyForCurrency) {
   const { jsPDF } = await import("jspdf");
   const receiptNo = resolveReceiptNumber(receipt);
+  const invoiceNo = receipt.ar_invoice_no || receipt.invoice_no || receiptNo;
+  const method = String(receipt.payment || receipt.payment_method || "").toUpperCase();
+  const isCredit = method === "CREDIT" || method === "MIXED" || method === "SPLIT";
+  const paidAmount = receipt.paid_amount != null
+    ? Number(receipt.paid_amount)
+    : isCredit
+      ? Number(receipt.cash_amount || 0)
+      : Number(receipt.total || 0);
+  const remaining = receipt.remaining_balance != null
+    ? Number(receipt.remaining_balance)
+    : isCredit
+      ? Math.max(0, Number(receipt.total || 0) - paidAmount)
+      : 0;
   const qrPayload = buildInvoiceQrPayload({
     invoiceId: receipt.id || receiptNo,
     receiptNo,
   });
   const money = (value) => formatMoneyForCurrency(value, receipt.currency_code);
-  const doc = new jsPDF({ unit: "mm", format: [80, Math.max(180, 110 + (receipt.items?.length || 0) * 7)] });
+  const extraLines = isCredit ? 5 : 0;
+  const doc = new jsPDF({
+    unit: "mm",
+    format: [80, Math.max(180, 120 + (receipt.items?.length || 0) * 7 + extraLines * 5)],
+  });
   let y = 8;
   const line = (left, right = "", bold = false) => {
     doc.setFont("helvetica", bold ? "bold" : "normal");
@@ -90,7 +104,12 @@ export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurren
     doc.text(String(settings.store_address), 40, y, { align: "center" });
     y += 4;
   }
+  if (settings.store_phone) {
+    doc.text(String(settings.store_phone), 40, y, { align: "center" });
+    y += 4;
+  }
   line(`Receipt: ${receiptNo}`);
+  if (invoiceNo) line(`Invoice: ${invoiceNo}`);
   line(`Date: ${receipt.time}`);
   line(`Cashier: ${receipt.cashier_name} (@${receipt.cashier_username})`);
   line(`Branch: ${receipt.branch_name}`);
@@ -99,7 +118,13 @@ export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurren
   doc.line(5, y - 1, 75, y - 1);
   y += 3;
   (receipt.items || []).forEach((item) => {
-    line(`${item.qty} x ${item.name}`, money(item.price * item.qty));
+    line(`${item.qty} x ${item.name}`, money(Number(item.price) * Number(item.qty)));
+    doc.setFontSize(6);
+    doc.setTextColor(100);
+    doc.text(`@ ${money(item.price)}`, 5, y);
+    doc.setTextColor(0);
+    y += 3;
+    doc.setFontSize(8);
   });
   doc.line(5, y - 1, 75, y - 1);
   y += 3;
@@ -107,10 +132,16 @@ export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurren
   line("Discount", `-${money(receipt.discountAmt)}`);
   if (receipt.vat_enabled) line(`VAT (${receipt.vat_rate}%)`, money(receipt.vat));
   line("TOTAL", money(receipt.total), true);
-  line("Payment", paymentMethodLabel(receipt.payment || receipt.payment_method));
-  if ((receipt.payment || receipt.payment_method) === "CASH") {
+  line("Payment", paymentMethodLabel(method));
+  if (method === "CASH") {
     line("Cash tendered", money(receipt.cash_tendered));
     line("Change", money(receipt.change_due));
+  }
+  if (isCredit) {
+    line("Paid Amount", money(paidAmount));
+    line("Remaining Balance", money(remaining), true);
+    if (receipt.payment_terms_days != null) line("Payment Terms", `Net ${receipt.payment_terms_days} days`);
+    if (receipt.due_date) line("Due Date", String(receipt.due_date).slice(0, 10));
   }
 
   y += 2;
@@ -129,7 +160,25 @@ export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurren
   doc.setFontSize(7);
   const footer = settings.receipt_footer || settings.receipt_header || "Thank you for shopping with us!";
   doc.text(String(footer), 40, y, { align: "center", maxWidth: 70 });
+  return { doc, receiptNo };
+}
 
+/**
+ * Build a thermal-friendly PDF with vector QR + CODE128 (no rasterization).
+ */
+export async function downloadReceiptPdf(receipt, settings, formatMoneyForCurrency) {
+  const { doc, receiptNo } = await buildReceiptPdfDoc(receipt, settings, formatMoneyForCurrency);
   doc.save(`${receiptNo}.pdf`);
   return { success: true, receipt_no: receiptNo };
+}
+
+/** Open receipt PDF in a new tab for manual printing (no browser print dialog from POS). */
+export async function openReceiptPdfPreview(receipt, settings, formatMoneyForCurrency) {
+  const { doc, receiptNo } = await buildReceiptPdfDoc(receipt, settings, formatMoneyForCurrency);
+  const blobUrl = doc.output("bloburl");
+  const opened = window.open(blobUrl, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    doc.save(`${receiptNo}.pdf`);
+  }
+  return { success: true, receipt_no: receiptNo, opened: Boolean(opened) };
 }

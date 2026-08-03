@@ -1,4 +1,4 @@
-import { Banknote, CreditCard, Smartphone } from "lucide-react";
+import { Banknote, CreditCard, Smartphone, Wallet } from "lucide-react";
 
 export const CARD_BRANDS = Object.freeze([
   { id: "VISA", label: "Visa" },
@@ -6,11 +6,13 @@ export const CARD_BRANDS = Object.freeze([
   { id: "AMEX", label: "Amex" },
 ]);
 
-/** POS checkout methods — Cash, Card, and M-Pesa only. */
+/** POS checkout methods — Cash, Card, M-Pesa, Credit, Mixed. */
 export const PAYMENT_METHODS = Object.freeze([
   { id: "CASH", label: "Cash", icon: Banknote, enabled: true },
   { id: "CARD", label: "Card", icon: CreditCard, enabled: true, brands: CARD_BRANDS },
   { id: "MPESA", label: "M-Pesa", icon: Smartphone, enabled: true },
+  { id: "CREDIT", label: "Credit", icon: Wallet, enabled: true },
+  { id: "MIXED", label: "Mixed (Cash + Credit)", icon: Wallet, enabled: true },
 ]);
 
 export const ACTIVE_PAYMENT_METHODS = PAYMENT_METHODS.filter((method) => method.enabled);
@@ -28,6 +30,12 @@ const METHOD_ALIASES = {
   M_PESA: "MPESA",
   "M-PESA": "MPESA",
   MOBILE_MONEY: "MPESA",
+  CREDIT: "CREDIT",
+  ACCOUNT: "CREDIT",
+  ON_ACCOUNT: "CREDIT",
+  MIXED: "MIXED",
+  SPLIT: "MIXED",
+  CASH_CREDIT: "MIXED",
 };
 
 export function normalizePaymentMethod(methodId) {
@@ -51,7 +59,7 @@ export function normalizeCardBrand(brand) {
 }
 
 /**
- * Validates a sale payment payload for checkout (Cash / Card / M-Pesa).
+ * Validates a sale payment payload for checkout.
  */
 export function validateSalePayment({
   payment_method,
@@ -59,6 +67,9 @@ export function validateSalePayment({
   cash_tendered,
   card_brand,
   mpesa_reference,
+  customer_id,
+  cash_amount,
+  credit_amount,
 } = {}) {
   const method = normalizePaymentMethod(payment_method);
   if (!isPaymentMethodEnabled(method)) {
@@ -85,6 +96,8 @@ export function validateSalePayment({
       card_brand: "",
       split_payments: [],
       payment_reference: "",
+      cash_amount: saleTotal,
+      credit_amount: 0,
     };
   }
 
@@ -101,6 +114,8 @@ export function validateSalePayment({
       card_brand: brand,
       split_payments: [],
       payment_reference: "",
+      cash_amount: saleTotal,
+      credit_amount: 0,
     };
   }
 
@@ -113,6 +128,59 @@ export function validateSalePayment({
       card_brand: "",
       split_payments: [],
       payment_reference: String(mpesa_reference || "").trim(),
+      cash_amount: saleTotal,
+      credit_amount: 0,
+    };
+  }
+
+  if (method === "CREDIT") {
+    if (customer_id == null || customer_id === "") {
+      return { success: false, error: "Select a customer for credit sales." };
+    }
+    return {
+      success: true,
+      payment_method: "CREDIT",
+      cash_tendered: 0,
+      change_due: 0,
+      card_brand: "",
+      split_payments: [],
+      payment_reference: "",
+      cash_amount: 0,
+      credit_amount: saleTotal,
+    };
+  }
+
+  if (method === "MIXED") {
+    if (customer_id == null || customer_id === "") {
+      return { success: false, error: "Select a customer for mixed cash + credit sales." };
+    }
+    const cash = Number(cash_amount);
+    const credit = credit_amount == null || credit_amount === ""
+      ? saleTotal - cash
+      : Number(credit_amount);
+    if (!Number.isFinite(cash) || cash < 0 || cash > saleTotal) {
+      return { success: false, error: "Enter a valid cash amount for the mixed payment." };
+    }
+    const creditPart = Number.isFinite(credit) ? credit : Math.max(0, saleTotal - cash);
+    if (Math.abs(cash + creditPart - saleTotal) > 0.02) {
+      return { success: false, error: "Cash + credit must equal the sale total." };
+    }
+    if (creditPart <= 0) {
+      return { success: false, error: "Mixed payment requires a credit portion. Use Cash for full payment." };
+    }
+    return {
+      success: true,
+      payment_method: "MIXED",
+      cash_tendered: cash,
+      change_due: 0,
+      card_brand: "",
+      split_payments: [
+        { method: "CASH", amount: cash },
+        { method: "CREDIT", amount: creditPart },
+      ],
+      payment_reference: "",
+      cash_amount: cash,
+      credit_amount: creditPart,
     };
   }
 

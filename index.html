@@ -30,6 +30,15 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Electron: force HashRouter before the app bundle evaluates (preload may load later). -->
+    <script>
+      (function () {
+        try {
+          var p = String(location.protocol || "");
+          if (p === "nexora:" || p === "file:") window.__NEXORA_FORCE_HASH__ = true;
+        } catch (e) {}
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

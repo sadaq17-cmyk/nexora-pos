@@ -2,6 +2,7 @@ import {
   getClientIp,
   consumeRateLimit,
   rateLimitResponse,
+  beginApiRequest,
   isAllowedOrigin,
   sanitizeText,
   escapeHtml,
@@ -41,6 +42,7 @@ const SUPPORTED_TYPES = new Set([
   "password_changed",
   "contact",
   "supplier_statement",
+  "customer_statement",
 ]);
 const TYPES_REQUIRING_LINK = new Set(["verification", "password_reset"]);
 const TYPES_REQUIRING_INTERNAL_SECRET = new Set(["verification", "password_reset"]);
@@ -208,12 +210,7 @@ function hasValidInternalSecret(req) {
 }
 
 export default async function handler(req, res) {
-  applySecurityHeaders(res);
-  if (req.method !== "POST") return methodNotAllowed(res, "POST");
-
-  if (!isAllowedOrigin(req)) {
-    return res.status(403).json({ success: false, error: "Forbidden origin.", code: "ORIGIN" });
-  }
+  if (beginApiRequest(req, res, { methods: ["POST"] })) return;
 
   const ip = getClientIp(req);
   if (!consumeRateLimit(`send-email:${ip}`, 12, 60_000)) {
@@ -347,6 +344,59 @@ export default async function handler(req, res) {
       subject: `Supplier Statement — ${supplier.name}`,
       html,
       text: `Please find attached the account statement for ${supplier.name}.`,
+      attachments: [{ filename: attachmentName, base64: pdfBase64, contentType: "application/pdf" }],
+    });
+  }
+
+  if (type === "customer_statement") {
+    if (!consumeRateLimit(`customer-statement-email:${ip}`, 6, 60_000)) {
+      return rateLimitResponse(res, 60);
+    }
+    const verified = await verifyCallerFromRequest(req);
+    if (verified.error) {
+      return jsonError(res, verified.status || 401, verified.error, "UNAUTHENTICATED");
+    }
+    const caller = verified.caller;
+
+    const to = sanitizeText(body.to, 160).toLowerCase();
+    const customerId = Number(body.customer_id);
+    const pdfBase64 = String(body.pdf_base64 || "");
+    const attachmentName = sanitizeText(body.filename, 150) || "customer-statement.pdf";
+    const note = sanitizeText(body.message, 1000);
+
+    if (!to || !isValidEmailAddress(to)) {
+      return res.status(400).json({ success: false, error: "A valid recipient email address is required." });
+    }
+    if (!customerId) {
+      return res.status(400).json({ success: false, error: "customer_id is required." });
+    }
+    if (!pdfBase64 || pdfBase64.length > 12_000_000) {
+      return res.status(400).json({ success: false, error: "A valid statement PDF attachment is required." });
+    }
+
+    const admin = createAdminClient();
+    const { data: customer } = await admin.from("customers").select("id,name,company_id").eq("id", customerId).maybeSingle();
+    if (!customer) {
+      return res.status(404).json({ success: false, error: "Customer not found." });
+    }
+    if (caller.role !== "platform_owner" && String(customer.company_id) !== String(caller.company_id)) {
+      return jsonError(res, 403, "You do not have access to this customer.", "FORBIDDEN");
+    }
+
+    const html = emailShell(`
+      <h2 style="font-size: 18px; margin: 0 0 12px;">Customer Statement</h2>
+      <p style="font-size: 14px; line-height: 1.6; margin: 0 0 12px;">Hello,</p>
+      <p style="font-size: 14px; line-height: 1.6; margin: 0 0 12px;">
+        Please find attached the account statement for <strong>${escapeHtml(customer.name)}</strong>.
+        ${note ? escapeHtml(note) : "Kindly review the attached document for invoices, payments, and balances."}
+      </p>
+      <p style="font-size: 13px; color: #64748B; margin: 0;">Sent by ${escapeHtml(caller.name || caller.username || "Nexora POS Pro")}.</p>
+    `);
+    return deliver(res, {
+      to,
+      subject: `Customer Statement — ${customer.name}`,
+      html,
+      text: `Please find attached the account statement for ${customer.name}.`,
       attachments: [{ filename: attachmentName, base64: pdfBase64, contentType: "application/pdf" }],
     });
   }

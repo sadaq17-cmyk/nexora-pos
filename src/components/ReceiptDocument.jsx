@@ -4,8 +4,7 @@ import { buildInvoiceQrPayload, resolveReceiptNumber } from "../lib/receiptCodes
 import { paymentMethodLabel } from "../lib/paymentMethods";
 
 /**
- * Current POS receipt template — layout/typography preserved.
- * Only addition: functional SVG QR + CODE128 barcode (no redesign).
+ * POS receipt template — includes credit sale fields when present.
  */
 export default function ReceiptDocument({
   receipt,
@@ -15,6 +14,19 @@ export default function ReceiptDocument({
 }) {
   const money = (value) => formatMoneyForCurrency(value, receipt.currency_code);
   const receiptNo = resolveReceiptNumber(receipt);
+  const invoiceNo = receipt.ar_invoice_no || receipt.invoice_no || receiptNo;
+  const method = String(receipt.payment || receipt.payment_method || "").toUpperCase();
+  const isCredit = method === "CREDIT" || method === "MIXED" || method === "SPLIT";
+  const paidAmount = receipt.paid_amount != null
+    ? Number(receipt.paid_amount)
+    : isCredit
+      ? Number(receipt.cash_amount || 0)
+      : Number(receipt.total || 0);
+  const remaining = receipt.remaining_balance != null
+    ? Number(receipt.remaining_balance)
+    : isCredit
+      ? Math.max(0, Number(receipt.total || 0) - paidAmount)
+      : 0;
   const qrValue = buildInvoiceQrPayload({
     invoiceId: receipt.id || receiptNo,
     receiptNo,
@@ -26,18 +38,20 @@ export default function ReceiptDocument({
         <div className="font-bold">{settings.store_name || "Store"}</div>
         <div className="text-xs text-app-muted">{settings.store_address}</div>
         {settings.store_phone && <div className="text-xs text-app-muted">{settings.store_phone}</div>}
+        {settings.tax_pin && <div className="text-xs text-app-muted">Tax PIN: {settings.tax_pin}</div>}
       </div>
       <div className="mb-3 border-y border-dashed border-app py-2 text-xs">
         <div>Receipt: {receiptNo}</div>
+        {invoiceNo && invoiceNo !== receiptNo && <div>Invoice: {invoiceNo}</div>}
+        {isCredit && invoiceNo === receiptNo && <div>Invoice: {invoiceNo}</div>}
         <div>Date: {receipt.time}</div>
         <div>Cashier: {receipt.cashier_name} (@{receipt.cashier_username})</div>
         <div>Branch: {receipt.branch_name}</div>
         <div>Customer: {receipt.customer}</div>
         <div>Currency: {receipt.currency_code} {receipt.currency_symbol}</div>
-        {receipt.vat_enabled && settings.tax_pin && <div>Tax PIN: {settings.tax_pin}</div>}
       </div>
       <div className="space-y-2">
-        {receipt.items.map((item) => (
+        {(receipt.items || []).map((item) => (
           <div key={`${item.id}-${item.name}`} className="flex justify-between gap-3 text-xs">
             <span>
               {item.qty} × {item.name}
@@ -52,12 +66,24 @@ export default function ReceiptDocument({
         <div className="flex justify-between"><span>Discount</span><span>-{money(receipt.discountAmt)}</span></div>
         {receipt.vat_enabled && <div className="flex justify-between"><span>VAT ({receipt.vat_rate}%)</span><span>{money(receipt.vat)}</span></div>}
         <div className="flex justify-between pt-1 text-base font-bold"><span>TOTAL</span><span>{money(receipt.total)}</span></div>
-        <div className="flex justify-between"><span>Payment</span><span>{paymentMethodLabel(receipt.payment || receipt.payment_method)}</span></div>
+        <div className="flex justify-between"><span>Payment</span><span>{paymentMethodLabel(method)}</span></div>
         {receipt.card_brand && <div className="flex justify-between"><span>Card</span><span>{receipt.card_brand}</span></div>}
-        {(receipt.payment === "CASH" || receipt.payment_method === "CASH") && (
+        {(method === "CASH") && (
           <>
             <div className="flex justify-between"><span>Cash tendered</span><span>{money(receipt.cash_tendered)}</span></div>
             <div className="flex justify-between"><span>Change</span><span>{money(receipt.change_due)}</span></div>
+          </>
+        )}
+        {isCredit && (
+          <>
+            <div className="flex justify-between"><span>Paid Amount</span><span>{money(paidAmount)}</span></div>
+            <div className="flex justify-between font-semibold"><span>Remaining Balance</span><span>{money(remaining)}</span></div>
+            {receipt.payment_terms_days != null && (
+              <div className="flex justify-between"><span>Payment Terms</span><span>Net {receipt.payment_terms_days} days</span></div>
+            )}
+            {receipt.due_date && (
+              <div className="flex justify-between"><span>Due Date</span><span>{String(receipt.due_date).slice(0, 10)}</span></div>
+            )}
           </>
         )}
       </div>

@@ -1,20 +1,36 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Absolute base on Vercel so nested SPA routes (/platform/users) load /assets correctly.
-// Relative base kept for local/Electron disk loads.
-export default defineConfig({
+// Electron / desktop builds MUST use "./" so file:// dist/index.html resolves assets.
+const isDesktopBuild = process.env.VITE_DESKTOP === "true" || process.env.ELECTRON_BUILD === "1";
+const base = isDesktopBuild ? "./" : process.env.VERCEL ? "/" : "./";
+
+export default defineConfig(({ mode }) => {
+  // Ensure .env / .env.local / .env.[mode]* are available for VITE_* inlining.
+  const fileEnv = loadEnv(mode, __dirname, "");
+  for (const [key, value] of Object.entries(fileEnv)) {
+    if (process.env[key] == null || process.env[key] === "") {
+      process.env[key] = value;
+    }
+  }
+
+  return {
   plugins: [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
   },
-  base: process.env.VERCEL ? "/" : "./",
+  base,
+  envPrefix: ["VITE_"],
+  define: {
+    "import.meta.env.VITE_DESKTOP": JSON.stringify(isDesktopBuild ? "true" : "false"),
+  },
   server: {
     port: 5173,
     strictPort: true,
@@ -48,4 +64,5 @@ export default defineConfig({
     },
     chunkSizeWarningLimit: 900,
   },
+};
 });
