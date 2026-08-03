@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { isOfflineDesktopShell, useHashRouter } from "./desktopRuntime.js";
+import { prefersHashRouter } from "./desktopRuntime.js";
 
 const viteEnv = (typeof import.meta !== "undefined" && import.meta.env) || {};
 const SUPABASE_URL = viteEnv.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
@@ -10,9 +10,7 @@ let sessionClient = null;
 let configError = null;
 
 function buildClient(storage) {
-  const desktop =
-    viteEnv.VITE_DESKTOP === "true" ||
-    (typeof window !== "undefined" && (useHashRouter() || isOfflineDesktopShell()));
+  const desktop = prefersHashRouter();
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: {
       persistSession: true,

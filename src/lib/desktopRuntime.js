@@ -31,8 +31,9 @@ export function isDesktopBuild() {
 /**
  * Desktop builds ALWAYS use HashRouter (compile-time + runtime guards).
  * Web/Vercel keep BrowserRouter.
+ * Named without a `use` prefix so non-React modules can call it safely.
  */
-export function useHashRouter() {
+export function prefersHashRouter() {
   if (typeof window === "undefined") {
     return import.meta.env.VITE_DESKTOP === "true";
   }
@@ -43,6 +44,11 @@ export function useHashRouter() {
   if (isDesktopShell()) return true;
   if (isOfflineDesktopShell()) return true;
   return false;
+}
+
+/** @deprecated Prefer prefersHashRouter — kept for existing React call sites. */
+export function useHashRouter() {
+  return prefersHashRouter();
 }
 
 export function resolveApiUrl(path) {
